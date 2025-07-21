@@ -258,6 +258,107 @@ jobs:
 
       - name: Test Airflow Web UI and API
         run: |
+          echo "=== Waiting for Airflow Web UI to be ready ==="
+
+          # Function to test if Airflow is ready
+          test_airflow_ready() {
+              # First test basic connectivity
+              if ! curl -s --connect-timeout 5 http://localhost:8080 > /dev/null; then
+                  return 1
+              fi
+              
+              # Test for a successful response (200, 302 redirect to login, etc.)
+              local status_code
+              status_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+              
+              if [[ "$status_code" == "200" ]] || [[ "$status_code" == "302" ]]; then
+                  return 0
+              fi
+              
+              return 1
+          }
+
+          # Wait for Airflow to be ready (up to 10 minutes)
+          echo "Waiting for Airflow web server to be ready..."
+          timeout 600 bash -c 'while ! test_airflow_ready; do echo "Waiting for Airflow..."; sleep 10; done'
+
+          if test_airflow_ready; then
+              echo "✅ Airflow web server is responding"
+          else
+              echo "❌ Airflow web server is not ready after 10 minutes"
+              echo "Container status:"
+              docker compose ps airflow-apiserver
+              echo "Recent logs:"
+              docker compose logs airflow-apiserver --tail=20
+              exit 1
+          fi
+
+          # Now test the actual endpoints more carefully
+          echo -e "\n=== Testing Airflow API endpoints ==="
+
+          # Determine which API version is available
+          api_version=""
+          for version in "v1" "v2"; do
+              status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/$version/version)
+              if [ "$status" = "200" ] || [ "$status" = "401" ]; then
+                  api_version=$version
+                  echo "✅ Found working API version: $version"
+                  break
+              fi
+          done
+
+          if [ -z "$api_version" ]; then
+              echo "❌ Could not find working API version"
+              echo "Testing all possible endpoints..."
+              
+              # Test various possible endpoints
+              test_endpoints=(
+                  "/api/v1/version"
+                  "/api/v2/version" 
+                  "/api/experimental/version"
+                  "/admin/rest_api/api"
+                  "/health"
+                  "/api/v1/health"
+              )
+              
+              for endpoint in "${test_endpoints[@]}"; do
+                  status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080$endpoint)
+                  echo "  $endpoint: HTTP $status"
+              done
+              exit 1
+          fi
+
+          # Test with authentication
+          echo -e "\nTesting authenticated endpoints..."
+          echo "Using default credentials (airflow:airflow)..."
+
+          # Test version endpoint
+          version_response=$(curl -s -u airflow:airflow http://localhost:8080/api/$api_version/version)
+          echo "Version response: $version_response"
+
+          # Test DAGs endpoint
+          dags_response=$(curl -s -u airflow:airflow http://localhost:8080/api/$api_version/dags)
+          echo "DAGs endpoint response status: $(curl -s -o /dev/null -w "%{http_code}" -u airflow:airflow http://localhost:8080/api/$api_version/dags)"
+
+          # Check if response contains DAG information
+          if echo "$dags_response" | grep -q "dags\|dag_id"; then
+              echo "✅ DAGs endpoint is working"
+              
+              # Check for test DAG
+              if echo "$dags_response" | grep -q "test_dag"; then
+                  echo "✅ Test DAG found in response"
+              else
+                  echo "⚠️  Test DAG not found. Available DAGs:"
+                  echo "$dags_response" | jq -r '.dags[]?.dag_id // empty' 2>/dev/null || echo "Could not parse DAG list"
+              fi
+          else
+              echo "⚠️  Unexpected DAGs response format: $dags_response"
+          fi
+
+          echo -e "\n✅ Airflow API testing completed!"
+
+      - name: Test Airflow Web UI and API
+        run: |
           # Wait for web UI to be accessible
           echo "Testing Airflow Web UI accessibility..."
           timeout 300 bash -c 'until curl -f http://localhost:8080/health; do sleep 10; done'
