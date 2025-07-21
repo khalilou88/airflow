@@ -357,61 +357,81 @@ jobs:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
           # Additional debugging step you can add before the DAG execution test
       - name: Debug Airflow setup before DAG test
         run: |
 
+          # Step 1: Create the corrected DAG file
+          cat > test_dag.py << 'EOF'
+          from datetime import datetime, timedelta
+          from airflow import DAG
+          from airflow.operators.bash import BashOperator
+          from airflow.operators.python import PythonOperator
 
+          # Default arguments
+          default_args = {
+              'owner': 'airflow',
+              'depends_on_past': False,
+              'start_date': datetime(2025, 7, 21),
+              'email_on_failure': False,
+              'email_on_retry': False,
+              'retries': 1,
+              'retry_delay': timedelta(minutes=5),
+          }
 
-          echo "=== Pre-DAG Test Debugging ==="
+          # Create the DAG - Note: using 'schedule' instead of 'schedule_interval'
+          dag = DAG(
+              'test_dag',
+              default_args=default_args,
+              description='A simple test DAG for Airflow 3.0',
+              schedule=timedelta(days=1),  # Changed from schedule_interval to schedule
+              catchup=False,
+              tags=['test'],
+          )
 
-          echo "1. Container status:"
-          docker compose ps
+          def print_hello():
+              return 'Hello from Airflow 3.0!'
 
-          echo -e "\n2. Service health status:"
-          for service in postgres redis airflow-apiserver airflow-scheduler airflow-worker; do
-          if docker compose ps "$service" --format "table {{.Service}}\t{{.Status}}" | grep -q "Up"; then
-              echo "  ✅ $service is running"
-          else
-              echo "  ❌ $service is not running properly"
-          fi
-          done
+          # Define tasks
+          hello_task = PythonOperator(
+              task_id='hello_python',
+              python_callable=print_hello,
+              dag=dag,
+          )
 
-          echo -e "\n3. Airflow webserver connectivity:"
-          for i in {1..3}; do
-          # Try different health endpoints that Airflow commonly uses
-          if curl -s -f -m 10 http://localhost:8080/ >/dev/null 2>&1; then
-              echo "  ✅ Webserver is responding (attempt $i)"
-              break
-          elif curl -s -f -m 10 http://localhost:8080/api/v2/version >/dev/null 2>&1; then
-              echo "  ✅ Webserver API is responding (attempt $i)"
-              break
-          else
-              echo "  ⚠️  Webserver not responding (attempt $i/3)"
-              if [ $i -eq 3 ]; then
-              echo "  ❌ Webserver is not accessible"
-              echo "  Recent logs:"
-              docker compose logs airflow-apiserver --tail=10
-              else
-              sleep 10
-              fi
-          fi
-          done
+          bash_task = BashOperator(
+              task_id='hello_bash',
+              bash_command='echo "Hello from Bash task in Airflow 3.0!"',
+              dag=dag,
+          )
 
-          echo -e "\n4. Check if test DAG file exists:"
-          if docker compose exec -T airflow-apiserver test -f /opt/airflow/dags/test_dag.py; then
-          echo "  ✅ test_dag.py exists"
-          echo "  File size: $(docker compose exec -T airflow-apiserver stat -c%s /opt/airflow/dags/test_dag.py) bytes"
-          else
-          echo "  ❌ test_dag.py not found"
-          echo "  Contents of DAGs directory:"
-          docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/
-          fi
+          # Set task dependencies
+          hello_task >> bash_task
+          EOF
 
-          echo -e "\n5. Test DAG syntax:"
+          # Step 2: Copy the corrected DAG to the Airflow container
+          echo "Copying corrected DAG file to Airflow container..."
+          docker compose cp test_dag.py airflow-apiserver:/opt/airflow/dags/test_dag.py
+
+          # Step 3: Verify the fix
+          echo "=== Verifying DAG Fix ==="
+
+          echo "1. Testing DAG syntax and import:"
           docker compose exec -T airflow-apiserver bash -c '
           cd /opt/airflow/dags
-          if [ -f test_dag.py ]; then
           echo "Testing DAG syntax..."
           python -m py_compile test_dag.py && echo "✅ Syntax OK" || echo "❌ Syntax error"
 
@@ -424,27 +444,32 @@ jobs:
               print(\"✅ DAG imports successfully\")
               print(f\"DAG ID: {test_dag.dag.dag_id}\")
               print(f\"Task count: {len(test_dag.dag.tasks)}\")
+              print(f\"Schedule: {test_dag.dag.schedule}\")
           except Exception as e:
               print(f\"❌ Import error: {e}\")
               import traceback
               traceback.print_exc()
           "
-          else
-          echo "No test_dag.py found to test"
-          fi
           '
 
-          echo -e "\n6. Check Airflow users:"
-          docker compose exec -T airflow-apiserver airflow users list || echo "Could not list users"
+          # Step 4: Wait for DAG processor to pick up changes
+          echo -e "\n2. Waiting for DAG processor to detect changes..."
+          sleep 15
 
-          echo -e "\n7. Check DAG parsing in Airflow:"
-          docker compose exec -T airflow-apiserver airflow dags list | grep test_dag || echo "test_dag not found in Airflow DAG list"
+          # Step 5: Check if DAG appears in Airflow
+          echo -e "\n3. Checking if DAG is now visible in Airflow:"
+          docker compose exec -T airflow-apiserver airflow dags list | grep test_dag && echo "✅ test_dag found in Airflow" || echo "⚠️ test_dag not yet visible (may need more time)"
 
-          echo -e "\n8. Check recent Airflow logs for any DAG parsing errors:"
-          echo "Scheduler logs:"
-          docker compose logs airflow-scheduler --tail=5
-          echo -e "\nDAG processor logs:"
-          docker compose logs airflow-dag-processor --tail=5
+          # Step 6: Check for any remaining import errors
+          echo -e "\n4. Checking for import errors:"
+          docker compose exec -T airflow-apiserver airflow dags list-import-errors
+
+          echo -e "\n5. DAG details (if available):"
+          docker compose exec -T airflow-apiserver airflow dags show test_dag || echo "DAG not yet available for show command"
+
+          echo -e "\n=== Fix Complete ==="
+          echo "If the DAG is not immediately visible, wait 1-2 minutes for the DAG processor to refresh."
+          echo "You can check the Airflow web UI at http://localhost:8080 to see the DAG."
 
       # Alternative simpler DAG execution test (more focused)
       - name: Simple DAG execution test
