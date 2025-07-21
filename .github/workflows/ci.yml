@@ -355,8 +355,7 @@ jobs:
       - name: Test DAG execution
         run: |
 
-
-          echo "=== Testing DAG execution ==="
+          echo "=== Testing DAG execution (Airflow 3.x compatible) ==="
 
           # First, make sure we have working credentials
           echo "1. Finding working credentials..."
@@ -369,7 +368,7 @@ jobs:
 
           working_creds=""
           for cred in "${credentials[@]}"; do
-              status=$(curl -s -o /dev/null -w "%{http_code}" -u "$cred" http://localhost:8080/api/v1/version 2>/dev/null)
+              status=$(curl -s -o /dev/null -w "%{http_code}" -u "$cred" http://localhost:8080/api/v2/version 2>/dev/null)
               if [ "$status" = "200" ]; then
                   working_creds="$cred"
                   echo "✅ Working credentials: $cred"
@@ -438,7 +437,7 @@ jobs:
                           # Try default admin credentials one more time
                           echo "Testing if default admin credentials work..."
                           for test_cred in "admin:admin" "airflow:airflow"; do
-                              status=$(curl -s -o /dev/null -w "%{http_code}" -u "$test_cred" http://localhost:8080/api/v1/version 2>/dev/null)
+                              status=$(curl -s -o /dev/null -w "%{http_code}" -u "$test_cred" http://localhost:8080/api/v2/version 2>/dev/null)
                               if [ "$status" = "200" ]; then
                                   working_creds="$test_cred"
                                   echo "✅ Found working credentials: $test_cred"
@@ -461,11 +460,11 @@ jobs:
 
           # Verify we can access the API
           echo -e "\n2. Verifying API access..."
-          api_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v1/version 2>/dev/null)
+          api_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v2/version 2>/dev/null)
           if [ "$api_status" != "200" ]; then
               echo "❌ API access failed with status: $api_status"
               echo "API response:"
-              curl -s -u "$working_creds" http://localhost:8080/api/v1/version 2>/dev/null || echo "No response"
+              curl -s -u "$working_creds" http://localhost:8080/api/v2/version 2>/dev/null || echo "No response"
               
               # Check if Airflow is actually running
               echo "Checking Airflow container status..."
@@ -479,13 +478,13 @@ jobs:
           fi
           echo "✅ API access verified"
 
-          # Test DAG endpoint access using v1 API
+          # Test DAG endpoint access using v2 API
           echo -e "\n2.5. Testing DAG endpoint access..."
-          dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
+          dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
           if [ "$dag_test_status" != "200" ]; then
               echo "❌ DAG endpoint access failed with status: $dag_test_status"
               echo "Response:"
-              curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null || echo "No response"
+              curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null || echo "No response"
               
               # Check authentication configuration
               echo "Checking Airflow authentication configuration..."
@@ -499,7 +498,7 @@ jobs:
 
           # Check if DAGs exist
           echo -e "\n3. Checking available DAGs..."
-          dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
+          dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
 
           # Debug: Show raw response if there's an issue
           if ! echo "$dags_response" | jq . >/dev/null 2>&1; then
@@ -519,7 +518,7 @@ jobs:
           if [ "$dag_count" -eq 0 ]; then
               echo "❌ No DAGs found. Creating a test DAG..."
               
-              # Create a test DAG file with correct Airflow syntax
+              # Create a test DAG file with correct Airflow 3.x syntax
               cat > /tmp/test_dag.py << 'EOF'
           from datetime import datetime, timedelta
           from airflow import DAG
@@ -527,7 +526,7 @@ jobs:
           from airflow.operators.python import PythonOperator
 
           def print_hello():
-              print("Hello from Airflow!")
+              print("Hello from Airflow 3.x!")
               return "Task completed successfully"
 
           default_args = {
@@ -544,10 +543,10 @@ jobs:
           dag = DAG(
               'test_dag',
               default_args=default_args,
-              description='A simple test DAG',
+              description='A simple test DAG for Airflow 3.x',
               schedule=None,  # Manual trigger only
               catchup=False,
-              tags=['test'],
+              tags=['test', 'airflow3'],
           )
 
           # Task 1: Print date
@@ -567,7 +566,7 @@ jobs:
           # Task 3: Sleep and echo
           task3 = BashOperator(
               task_id='sleep_and_echo',
-              bash_command='sleep 5 && echo "Test DAG completed successfully"',
+              bash_command='sleep 5 && echo "Test DAG completed successfully with Airflow 3.x"',
               dag=dag,
           )
 
@@ -606,7 +605,7 @@ jobs:
                   sleep 5
                   echo "Checking DAG availability... (${i}/18)"
                   
-                  dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
+                  dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
                   dag_count=$(echo "$dags_response" | jq -r '.total_entries // 0' 2>/dev/null)
                   
                   if [ "$dag_count" -gt 0 ]; then
@@ -622,7 +621,7 @@ jobs:
               done
               
               # Final check
-              dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
+              dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
               dag_count=$(echo "$dags_response" | jq -r '.total_entries // 0' 2>/dev/null)
               
               if [ "$dag_count" -gt 0 ]; then
@@ -630,9 +629,9 @@ jobs:
               else
                   echo "❌ Failed to create test DAG. Checking detailed status..."
                   
-                  # Check DAG parsing errors
+                  # Check DAG parsing errors using v2 API
                   echo "Checking for DAG import errors..."
-                  import_errors=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/importErrors 2>/dev/null)
+                  import_errors=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/importErrors 2>/dev/null)
                   if echo "$import_errors" | jq -e '.import_errors[]?' >/dev/null 2>&1; then
                       echo "DAG import errors found:"
                       echo "$import_errors" | jq -r '.import_errors[] | "  \(.filename): \(.stack_trace)"' 2>/dev/null
@@ -687,7 +686,7 @@ jobs:
 
           # Check if the DAG is paused and unpause it if needed
           echo -e "\n5. Checking DAG status..."
-          dag_details=$(curl -s -u "$working_creds" "http://localhost:8080/api/v1/dags/$dag_to_test" 2>/dev/null)
+          dag_details=$(curl -s -u "$working_creds" "http://localhost:8080/api/v2/dags/$dag_to_test" 2>/dev/null)
           is_paused=$(echo "$dag_details" | jq -r '.is_paused // false' 2>/dev/null)
 
           if [ "$is_paused" = "true" ]; then
@@ -696,7 +695,7 @@ jobs:
                   -u "$working_creds" \
                   -H "Content-Type: application/json" \
                   -d '{"is_paused": false}' \
-                  "http://localhost:8080/api/v1/dags/$dag_to_test" 2>/dev/null)
+                  "http://localhost:8080/api/v2/dags/$dag_to_test" 2>/dev/null)
               
               if echo "$unpause_result" | grep -q '"is_paused": false'; then
                   echo "✅ DAG unpaused successfully"
@@ -708,13 +707,13 @@ jobs:
               echo "✅ DAG is active"
           fi
 
-          # Trigger the DAG
+          # Trigger the DAG using v2 API
           echo -e "\n6. Triggering DAG: $dag_to_test"
           trigger_response=$(curl -s -X POST \
               -u "$working_creds" \
               -H "Content-Type: application/json" \
               -d '{}' \
-              "http://localhost:8080/api/v1/dags/$dag_to_test/dagRuns" 2>/dev/null)
+              "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns" 2>/dev/null)
 
           echo "Trigger response: $trigger_response"
 
@@ -730,7 +729,7 @@ jobs:
                   echo "Checking status... (${i}/30)"
                   
                   run_response=$(curl -s -u "$working_creds" \
-                      "http://localhost:8080/api/v1/dags/$dag_to_test/dagRuns/$dag_run_id" 2>/dev/null)
+                      "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id" 2>/dev/null)
                   
                   run_status=$(echo "$run_response" | jq -r '.state // empty' 2>/dev/null)
                   
@@ -755,7 +754,7 @@ jobs:
               # Final status check
               echo -e "\n8. Final status report..."
               run_response=$(curl -s -u "$working_creds" \
-                  "http://localhost:8080/api/v1/dags/$dag_to_test/dagRuns/$dag_run_id" 2>/dev/null)
+                  "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id" 2>/dev/null)
               
               run_status=$(echo "$run_response" | jq -r '.state // empty' 2>/dev/null)
               start_date=$(echo "$run_response" | jq -r '.start_date // empty' 2>/dev/null)
@@ -765,10 +764,10 @@ jobs:
               echo "Start date: $start_date"
               echo "End date: $end_date"
               
-              # Get task instances status
+              # Get task instances status using v2 API
               echo -e "\nTask status:"
               tasks_response=$(curl -s -u "$working_creds" \
-                  "http://localhost:8080/api/v1/dags/$dag_to_test/dagRuns/$dag_run_id/taskInstances" 2>/dev/null)
+                  "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id/taskInstances" 2>/dev/null)
               
               if echo "$tasks_response" | jq -e '.task_instances[]?' > /dev/null 2>&1; then
                   echo "$tasks_response" | jq -r '.task_instances[] | "  \(.task_id): \(.state)"' 2>/dev/null
@@ -785,17 +784,17 @@ jobs:
                       echo "Failed tasks: $failed_tasks"
                       for task_id in $failed_tasks; do
                           echo -e "\nLogs for failed task: $task_id"
+                          # Note: Log API endpoints may have changed in v2, try different approaches
                           log_response=$(curl -s -u "$working_creds" \
-                              "http://localhost:8080/api/v1/dags/$dag_to_test/dagRuns/$dag_run_id/taskInstances/$task_id/logs/1" 2>/dev/null)
+                              "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id/taskInstances/$task_id/logs/1" 2>/dev/null)
                           
                           # Extract log content if available
                           if echo "$log_response" | jq -e '.content?' >/dev/null 2>&1; then
                               echo "$log_response" | jq -r '.content' 2>/dev/null
                           else
-                              echo "Log content not available via API"
+                              echo "Log content not available via API, trying container logs..."
                               
                               # Try to get logs from container directly
-                              echo "Attempting to get logs from container..."
                               docker compose exec -T airflow-apiserver bash -c "
                                   find /opt/airflow/logs -name '*${task_id}*' -type f | head -5 | xargs tail -20
                               " 2>/dev/null || echo "Could not retrieve logs from container"
