@@ -500,42 +500,6 @@ jobs:
 
           echo -e "\n✅ DAG trigger test completed!"
 
-      - name: Test DAG execution
-        run: |
-          echo "Testing DAG execution..."
-
-          # Trigger the test DAG using the REST API
-          echo "Triggering test DAG..."
-          trigger_response=$(curl -s -X POST \
-            -u airflow:airflow \
-            -H "Content-Type: application/json" \
-            -d '{}' \
-            http://localhost:8080/api/v2/dags/test_dag/dagRuns)
-
-          echo "Trigger response: $trigger_response"
-
-          # Extract dag_run_id from response
-          dag_run_id=$(echo "$trigger_response" | jq -r '.dag_run_id')
-          echo "DAG Run ID: $dag_run_id"
-
-          if [ "$dag_run_id" = "null" ] || [ -z "$dag_run_id" ]; then
-            echo "❌ Failed to trigger DAG"
-            exit 1
-          fi
-
-          echo "✅ DAG triggered successfully with run ID: $dag_run_id"
-
-          # Wait a bit for the DAG to potentially execute
-          sleep 30
-
-          # Check DAG run status
-          echo "Checking DAG run status..."
-          run_status=$(curl -s -u airflow:airflow \
-            "http://localhost:8080/api/v2/dags/test_dag/dagRuns/$dag_run_id" | \
-            jq -r '.state')
-
-          echo "DAG run state: $run_status"
-
       - name: Clean up
         if: always()
         run: |
