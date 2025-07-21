@@ -2,9 +2,9 @@ name: Test Airflow Docker Compose
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
           from datetime import datetime, timedelta
           from airflow import DAG
           from airflow.operators.bash import BashOperator
-          
+
           default_args = {
               'owner': 'test',
               'depends_on_past': False,
@@ -51,7 +51,7 @@ jobs:
               'retries': 1,
               'retry_delay': timedelta(minutes=5),
           }
-          
+
           dag = DAG(
               'test_dag',
               default_args=default_args,
@@ -60,7 +60,7 @@ jobs:
               catchup=False,
               tags=['test'],
           )
-          
+
           test_task = BashOperator(
               task_id='test_task',
               bash_command='echo "Hello from Airflow test!"',
@@ -72,7 +72,7 @@ jobs:
         run: |
           # Initialize the database as per official documentation
           echo "Running airflow-init to initialize database and create admin user..."
-          docker compose up airflow-init 
+          docker compose up airflow-init
 
       - name: Start Airflow services
         run: |
@@ -83,13 +83,13 @@ jobs:
       - name: Wait for services to be healthy
         run: |
           echo "Waiting for services to be healthy..."
-          
+
           # Function to check if container is healthy
           check_health() {
             local service=$1
             local timeout=${2:-300}
             local count=0
-          
+
             while [ $count -lt $timeout ]; do
               if docker compose ps "$service" --format json | jq -r '.[0].Health' | grep -q "healthy"; then
                 echo "✅ $service is healthy"
@@ -99,18 +99,18 @@ jobs:
               count=$((count + 5))
               echo "Waiting for $service... ($count/$timeout seconds)"
             done
-          
+
             echo "❌ $service failed to become healthy within $timeout seconds"
             return 1
           }
-          
+
           # Wait for core services to be healthy
           check_health "postgres" 180
           check_health "redis" 180
-          
+
           # Wait a bit for Airflow services to stabilize
           sleep 30
-          
+
           # Check Airflow services
           services=("airflow-apiserver" "airflow-scheduler" "airflow-dag-processor" "airflow-worker" "airflow-triggerer")
           for service in "${services[@]}"; do
@@ -121,10 +121,10 @@ jobs:
         run: |
           echo "=== Container Status ==="
           docker compose ps
-          
+
           echo -e "\n=== Verifying all expected containers are running ==="
           expected_services=("postgres" "redis" "airflow-apiserver" "airflow-scheduler" "airflow-dag-processor" "airflow-worker" "airflow-triggerer")
-          
+
           for service in "${expected_services[@]}"; do
             if docker compose ps "$service" --format json | jq -r '.[0].State' | grep -q "running"; then
               echo "✅ $service is running"
@@ -141,23 +141,23 @@ jobs:
           echo "Testing Airflow Web UI accessibility..."
           timeout 300 bash -c 'until curl -f http://localhost:8080/health; do sleep 10; done'
           echo "✅ Airflow Web UI is accessible"
-          
+
           # Test API endpoints using official documentation examples
           echo "Testing Airflow REST API..."
-          
+
           # Test version endpoint
           echo "Testing version endpoint..."
           curl -f http://localhost:8080/api/v2/version
-          
+
           # Test health endpoint  
           echo -e "\nTesting health endpoint..."
           curl -f http://localhost:8080/health
-          
+
           # Test authenticated endpoints (using default credentials from docs)
           echo -e "\nTesting DAGs endpoint with authentication..."
           response=$(curl -s -u airflow:airflow http://localhost:8080/api/v2/dags)
           echo "DAGs response: $response"
-          
+
           # Verify our test DAG is loaded
           if echo "$response" | grep -q "test_dag"; then
             echo "✅ Test DAG found in Airflow"
@@ -171,14 +171,14 @@ jobs:
       - name: Test CLI commands
         run: |
           echo "Testing Airflow CLI commands..."
-          
+
           # Test airflow info command as per documentation
           docker compose run --rm airflow-worker airflow info
-          
+
           # Test airflow version
           echo -e "\nTesting airflow version..."
           docker compose run --rm airflow-worker airflow version
-          
+
           # List DAGs via CLI
           echo -e "\nListing DAGs via CLI..."
           docker compose run --rm airflow-worker airflow dags list
@@ -186,7 +186,7 @@ jobs:
       - name: Test DAG execution
         run: |
           echo "Testing DAG execution..."
-          
+
           # Trigger the test DAG using the REST API
           echo "Triggering test DAG..."
           trigger_response=$(curl -s -X POST \
@@ -194,29 +194,29 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{}' \
             http://localhost:8080/api/v2/dags/test_dag/dagRuns)
-          
+
           echo "Trigger response: $trigger_response"
-          
+
           # Extract dag_run_id from response
           dag_run_id=$(echo "$trigger_response" | jq -r '.dag_run_id')
           echo "DAG Run ID: $dag_run_id"
-          
+
           if [ "$dag_run_id" = "null" ] || [ -z "$dag_run_id" ]; then
             echo "❌ Failed to trigger DAG"
             exit 1
           fi
-          
+
           echo "✅ DAG triggered successfully with run ID: $dag_run_id"
-          
+
           # Wait a bit for the DAG to potentially execute
           sleep 30
-          
+
           # Check DAG run status
           echo "Checking DAG run status..."
           run_status=$(curl -s -u airflow:airflow \
             "http://localhost:8080/api/v2/dags/test_dag/dagRuns/$dag_run_id" | \
             jq -r '.state')
-          
+
           echo "DAG run state: $run_status"
 
       - name: Clean up
@@ -225,7 +225,7 @@ jobs:
           echo "Cleaning up Docker Compose environment..."
           # Stop and remove containers, networks, and volumes as per official documentation
           docker compose down --volumes --remove-orphans
-          
+
           # Optional: Remove images to free up space
           # docker compose down --volumes --remove-orphans --rmi all
 
@@ -234,31 +234,31 @@ jobs:
         run: |
           echo "=== Docker Compose Services Status ==="
           docker compose ps
-          
+
           echo -e "\n=== System Resources ==="
           df -h
           docker system df
-          
+
           echo -e "\n=== Airflow Init Logs ==="
           docker compose logs airflow-init || echo "airflow-init container not found"
-          
+
           echo -e "\n=== Airflow API Server Logs ==="
           docker compose logs airflow-apiserver --tail=50
-          
+
           echo -e "\n=== Airflow Scheduler Logs ==="
           docker compose logs airflow-scheduler --tail=50
-          
+
           echo -e "\n=== Airflow DAG Processor Logs ==="
           docker compose logs airflow-dag-processor --tail=50
-          
+
           echo -e "\n=== Airflow Worker Logs ==="
           docker compose logs airflow-worker --tail=50
-          
+
           echo -e "\n=== Airflow Triggerer Logs ==="
           docker compose logs airflow-triggerer --tail=50
-          
+
           echo -e "\n=== Postgres Logs ==="
           docker compose logs postgres --tail=30
-          
+
           echo -e "\n=== Redis Logs ==="
           docker compose logs redis --tail=30
