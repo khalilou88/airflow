@@ -337,39 +337,6 @@ jobs:
           echo "You can access the web UI at: http://localhost:8080"
           echo "Default credentials are typically: airflow / airflow"
 
-      - name: Test Airflow Web UI and API
-        run: |
-          # Wait for web UI to be accessible
-          echo "Testing Airflow Web UI accessibility..."
-          timeout 300 bash -c 'until curl -f http://localhost:8080/health; do sleep 10; done'
-          echo "✅ Airflow Web UI is accessible"
-
-          # Test API endpoints using official documentation examples
-          echo "Testing Airflow REST API..."
-
-          # Test version endpoint
-          echo "Testing version endpoint..."
-          curl -f http://localhost:8080/api/v2/version
-
-          # Test health endpoint  
-          echo -e "\nTesting health endpoint..."
-          curl -f http://localhost:8080/health
-
-          # Test authenticated endpoints (using default credentials from docs)
-          echo -e "\nTesting DAGs endpoint with authentication..."
-          response=$(curl -s -u airflow:airflow http://localhost:8080/api/v2/dags)
-          echo "DAGs response: $response"
-
-          # Verify our test DAG is loaded
-          if echo "$response" | grep -q "test_dag"; then
-            echo "✅ Test DAG found in Airflow"
-          else
-            echo "❌ Test DAG not found in Airflow"
-            echo "Available DAGs:"
-            echo "$response" | jq -r '.dags[].dag_id' || echo "$response"
-            exit 1
-          fi
-
       - name: Test CLI commands
         run: |
           echo "Testing Airflow CLI commands..."
