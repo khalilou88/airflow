@@ -354,6 +354,8 @@ jobs:
 
       - name: Test DAG execution
         run: |
+
+
           echo "=== Testing DAG execution ==="
 
           # First, make sure we have working credentials
@@ -375,26 +377,85 @@ jobs:
               fi
           done
 
-          # If no credentials work, try to create the default user
+          # If no credentials work, handle existing user properly
           if [ -z "$working_creds" ]; then
-              echo "No working credentials found. Creating default airflow user..."
+              echo "No working credentials found. Checking existing airflow user..."
               
-              create_result=$(docker compose exec -T airflow-apiserver airflow users create \
+              # First try to update the existing user's password
+              echo "Attempting to update existing user password..."
+              update_result=$(docker compose exec -T airflow-apiserver airflow users create \
                   --role Admin \
                   --username airflow \
                   --email airflow@example.com \
                   --firstname Airflow \
                   --lastname Admin \
-                  --password airflow 2>/dev/null || echo "FAILED")
+                  --password airflow \
+                  --use-random-password false 2>&1 || echo "UPDATE_FAILED")
               
-              if echo "$create_result" | grep -q "successfully\|created"; then
-                  echo "✅ User created successfully"
-                  working_creds="airflow:airflow"
-                  # Give it a moment to propagate
-                  sleep 5
+              if echo "$update_result" | grep -q "already exist"; then
+                  echo "User exists. Trying to delete and recreate..."
+                  
+                  # Delete existing user
+                  delete_result=$(docker compose exec -T airflow-apiserver airflow users delete --username airflow 2>&1 || echo "DELETE_FAILED")
+                  echo "Delete result: $delete_result"
+                  
+                  # Wait a moment
+                  sleep 3
+                  
+                  # Create new user
+                  create_result=$(docker compose exec -T airflow-apiserver airflow users create \
+                      --role Admin \
+                      --username airflow \
+                      --email airflow@example.com \
+                      --firstname Airflow \
+                      --lastname Admin \
+                      --password airflow 2>&1 || echo "CREATE_FAILED")
+                  
+                  if echo "$create_result" | grep -q "successfully\|created" && ! echo "$create_result" | grep -q "FAILED\|Error"; then
+                      echo "✅ User recreated successfully"
+                      working_creds="airflow:airflow"
+                      sleep 5
+                  else
+                      echo "❌ Failed to recreate user: $create_result"
+                      
+                      # Try alternative approach - reset password if user exists
+                      echo "Trying password reset approach..."
+                      reset_result=$(docker compose exec -T airflow-apiserver bash -c "
+                          airflow users list | grep airflow && 
+                          echo 'User exists, trying alternative creation...' &&
+                          airflow users create --role Admin --username testuser --email test@example.com --firstname Test --lastname User --password testpass 2>/dev/null
+                      " 2>&1)
+                      
+                      if echo "$reset_result" | grep -q "successfully\|created"; then
+                          echo "✅ Alternative user created"
+                          working_creds="testuser:testpass"
+                          sleep 5
+                      else
+                          echo "❌ All user creation attempts failed"
+                          echo "Let's check what users exist:"
+                          docker compose exec -T airflow-apiserver airflow users list || echo "Could not list users"
+                          
+                          # Try default admin credentials one more time
+                          echo "Testing if default admin credentials work..."
+                          for test_cred in "admin:admin" "airflow:airflow"; do
+                              status=$(curl -s -o /dev/null -w "%{http_code}" -u "$test_cred" http://localhost:8080/api/v1/version 2>/dev/null)
+                              if [ "$status" = "200" ]; then
+                                  working_creds="$test_cred"
+                                  echo "✅ Found working credentials: $test_cred"
+                                  break
+                              fi
+                          done
+                          
+                          if [ -z "$working_creds" ]; then
+                              echo "❌ No working credentials found after all attempts"
+                              exit 1
+                          fi
+                      fi
+                  fi
               else
-                  echo "❌ Failed to create user: $create_result"
-                  exit 1
+                  echo "✅ User created/updated successfully"
+                  working_creds="airflow:airflow"
+                  sleep 5
               fi
           fi
 
@@ -405,6 +466,15 @@ jobs:
               echo "❌ API access failed with status: $api_status"
               echo "API response:"
               curl -s -u "$working_creds" http://localhost:8080/api/v1/version 2>/dev/null || echo "No response"
+              
+              # Check if Airflow is actually running
+              echo "Checking Airflow container status..."
+              docker compose ps
+              
+              # Check webserver logs
+              echo "Recent webserver logs:"
+              docker compose logs --tail=20 airflow-apiserver || docker compose logs --tail=20 airflow-webserver || echo "No webserver logs available"
+              
               exit 1
           fi
           echo "✅ API access verified"
@@ -414,49 +484,15 @@ jobs:
           dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
           if [ "$dag_test_status" != "200" ]; then
               echo "❌ DAG endpoint access failed with status: $dag_test_status"
+              echo "Response:"
+              curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null || echo "No response"
               
-              # Try to fix permissions by recreating user with explicit permissions
-              echo "Attempting to fix user permissions..."
+              # Check authentication configuration
+              echo "Checking Airflow authentication configuration..."
+              docker compose exec -T airflow-apiserver airflow config get-value webserver authenticate 2>/dev/null || echo "Could not get auth config"
+              docker compose exec -T airflow-apiserver airflow config get-value api auth_backends 2>/dev/null || echo "Could not get API auth config"
               
-              # Delete existing user if it exists
-              docker compose exec -T airflow-apiserver airflow users delete --username airflow 2>/dev/null || true
-              
-              # Create user with explicit role
-              create_result=$(docker compose exec -T airflow-apiserver airflow users create \
-                  --role Admin \
-                  --username airflow \
-                  --email airflow@example.com \
-                  --firstname Airflow \
-                  --lastname Admin \
-                  --password airflow 2>&1)
-              
-              echo "User creation result: $create_result"
-              
-              # Wait for permissions to propagate
-              sleep 10
-              
-              # Test again
-              dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
-              if [ "$dag_test_status" != "200" ]; then
-                  echo "❌ Still cannot access DAG endpoint. Checking webserver configuration..."
-                  
-                  # Check if authentication is properly configured
-                  echo "Checking Airflow configuration..."
-                  docker compose exec -T airflow-apiserver airflow config get-value api auth_backends 2>/dev/null || echo "Could not get auth config"
-                  
-                  # Try accessing web UI to see if that works
-                  web_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ 2>/dev/null)
-                  echo "Web UI status: $web_status"
-                  
-                  if [ "$web_status" != "200" ]; then
-                      echo "❌ Web UI also not accessible. Airflow may not be fully started."
-                      echo "Checking container status..."
-                      docker compose ps
-                      exit 1
-                  fi
-              else
-                  echo "✅ DAG endpoint access fixed"
-              fi
+              exit 1
           else
               echo "✅ DAG endpoint access verified"
           fi
@@ -541,24 +577,51 @@ jobs:
               
               # Copy the DAG file to the Airflow DAGs directory
               echo "Copying test DAG to Airflow container..."
+              
+              # Ensure dags directory exists
               docker compose exec -T airflow-apiserver mkdir -p /opt/airflow/dags
+              
+              # Copy DAG file
               docker compose cp /tmp/test_dag.py airflow-apiserver:/opt/airflow/dags/
               
               # Also check scheduler container if it's separate
               if docker compose ps | grep -q scheduler; then
                   echo "Copying DAG to scheduler container as well..."
+                  docker compose exec -T airflow-scheduler mkdir -p /opt/airflow/dags 2>/dev/null || true
                   docker compose cp /tmp/test_dag.py airflow-scheduler:/opt/airflow/dags/ 2>/dev/null || echo "Scheduler container copy failed or not needed"
               fi
               
-              # Force DAG parsing by restarting scheduler or triggering refresh
+              # Force DAG parsing by triggering refresh
               echo "Triggering DAG refresh..."
-              docker compose exec -T airflow-apiserver airflow dags reserialize 2>/dev/null || echo "Reserialize command not available"
+              docker compose exec -T airflow-apiserver bash -c "
+                  # Try different methods to refresh DAGs
+                  airflow dags reserialize 2>/dev/null || 
+                  airflow dags trigger-dag-refresh 2>/dev/null || 
+                  echo 'Manual refresh commands not available'
+              "
               
               # Wait for DAG to be parsed - increased wait time
-              echo "Waiting for DAG to be parsed (60 seconds)..."
-              sleep 60
+              echo "Waiting for DAG to be parsed (90 seconds)..."
+              for i in {1..18}; do  # 18 * 5 = 90 seconds
+                  sleep 5
+                  echo "Checking DAG availability... (${i}/18)"
+                  
+                  dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
+                  dag_count=$(echo "$dags_response" | jq -r '.total_entries // 0' 2>/dev/null)
+                  
+                  if [ "$dag_count" -gt 0 ]; then
+                      echo "✅ DAG detected after ${i} checks"
+                      break
+                  fi
+                  
+                  # Every 6th check, show some debug info
+                  if [ $((i % 6)) -eq 0 ]; then
+                      echo "Debug info at check $i:"
+                      docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/ 2>/dev/null || echo "Cannot list DAG directory"
+                  fi
+              done
               
-              # Check if the DAG is now available
+              # Final check
               dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v1/dags 2>/dev/null)
               dag_count=$(echo "$dags_response" | jq -r '.total_entries // 0' 2>/dev/null)
               
@@ -574,21 +637,29 @@ jobs:
                       echo "DAG import errors found:"
                       echo "$import_errors" | jq -r '.import_errors[] | "  \(.filename): \(.stack_trace)"' 2>/dev/null
                   else
-                      echo "No import errors found"
+                      echo "No import errors found via API"
                   fi
                   
-                  # Check scheduler logs
-                  echo "Recent scheduler/parser logs:"
+                  # Check if DAG file exists and is readable
+                  echo "Checking DAG file in container..."
+                  docker compose exec -T airflow-apiserver bash -c "
+                      echo 'DAG directory contents:'
+                      ls -la /opt/airflow/dags/
+                      echo -e '\nDAG file syntax check:'
+                      python -m py_compile /opt/airflow/dags/test_dag.py 2>&1 || echo 'Syntax check failed'
+                      echo -e '\nDAG file permissions:'
+                      ls -l /opt/airflow/dags/test_dag.py
+                  "
+                  
+                  # Check logs for DAG processing
+                  echo "Checking logs for DAG processing..."
                   if docker compose ps | grep -q scheduler; then
-                      docker compose logs --tail=50 airflow-scheduler | grep -i "dag\|error\|exception" || echo "No relevant scheduler logs"
+                      echo "Scheduler logs:"
+                      docker compose logs --tail=30 airflow-scheduler | grep -i "dag\|test_dag\|error\|parsing" || echo "No relevant scheduler logs"
                   else
-                      docker compose logs --tail=50 airflow-apiserver | grep -i "dag\|error\|exception" || echo "No relevant logs"
+                      echo "Webserver/All-in-one logs:"
+                      docker compose logs --tail=30 airflow-apiserver | grep -i "dag\|test_dag\|error\|parsing" || echo "No relevant logs"
                   fi
-                  
-                  # Check if DAG file exists in container
-                  echo "Checking if DAG file exists in container..."
-                  docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/ || echo "Could not list DAG directory"
-                  docker compose exec -T airflow-apiserver cat /opt/airflow/dags/test_dag.py | head -10 || echo "Could not read DAG file"
                   
                   exit 1
               fi
@@ -722,6 +793,12 @@ jobs:
                               echo "$log_response" | jq -r '.content' 2>/dev/null
                           else
                               echo "Log content not available via API"
+                              
+                              # Try to get logs from container directly
+                              echo "Attempting to get logs from container..."
+                              docker compose exec -T airflow-apiserver bash -c "
+                                  find /opt/airflow/logs -name '*${task_id}*' -type f | head -5 | xargs tail -20
+                              " 2>/dev/null || echo "Could not retrieve logs from container"
                           fi
                       done
                   fi
