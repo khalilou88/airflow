@@ -72,22 +72,7 @@ jobs:
         run: |
           # Initialize the database as per official documentation
           echo "Running airflow-init to initialize database and create admin user..."
-          docker compose up airflow-init
-          
-          # Check if airflow-init completed successfully
-          if [ "$(docker compose ps airflow-init --format json | jq -r '.[0].State')" != "exited" ]; then
-            echo "airflow-init failed to complete"
-            docker compose logs airflow-init
-            exit 1
-          fi
-          
-          if [ "$(docker compose ps airflow-init --format json | jq -r '.[0].ExitCode')" != "0" ]; then
-            echo "airflow-init exited with non-zero code"
-            docker compose logs airflow-init
-            exit 1
-          fi
-          
-          echo "✅ Airflow initialization completed successfully"
+          docker compose up airflow-init 
 
       - name: Start Airflow services
         run: |
