@@ -352,6 +352,382 @@ jobs:
           echo -e "\nListing DAGs via CLI..."
           docker compose run --rm airflow-worker airflow dags list
 
+      # Additional debugging step you can add before the DAG execution test
+      - name: Debug Airflow setup before DAG test
+        run: |
+          echo "=== Pre-DAG Test Debugging ==="
+
+          echo "1. Container status:"
+          docker compose ps
+
+          echo -e "\n2. Service health status:"
+          for service in postgres redis airflow-apiserver airflow-scheduler airflow-worker; do
+            if docker compose ps "$service" --format "table {{.Service}}\t{{.Status}}" | grep -q "Up"; then
+              echo "  ✅ $service is running"
+            else
+              echo "  ❌ $service is not running properly"
+            fi
+          done
+
+          echo -e "\n3. Airflow webserver connectivity:"
+          for i in {1..3}; do
+            if curl -s -f -m 10 http://localhost:8080/health >/dev/null 2>&1; then
+              echo "  ✅ Webserver is responding (attempt $i)"
+              break
+            else
+              echo "  ⚠️  Webserver not responding (attempt $i/3)"
+              if [ $i -eq 3 ]; then
+                echo "  ❌ Webserver is not accessible"
+                docker compose logs airflow-apiserver --tail=10
+              else
+                sleep 10
+              fi
+            fi
+          done
+
+          echo -e "\n4. Check if test DAG file exists:"
+          if docker compose exec -T airflow-apiserver test -f /opt/airflow/dags/test_dag.py; then
+            echo "  ✅ test_dag.py exists"
+            echo "  File size: $(docker compose exec -T airflow-apiserver stat -c%s /opt/airflow/dags/test_dag.py) bytes"
+          else
+            echo "  ❌ test_dag.py not found"
+            echo "  Contents of DAGs directory:"
+            docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/
+          fi
+
+          echo -e "\n5. Test DAG syntax:"
+          docker compose exec -T airflow-apiserver bash -c '
+            cd /opt/airflow/dags
+            if [ -f test_dag.py ]; then
+              echo "Testing DAG syntax..."
+              python -m py_compile test_dag.py && echo "✅ Syntax OK" || echo "❌ Syntax error"
+              
+              echo "Testing DAG import..."
+              python -c "
+              import sys
+              sys.path.insert(0, \"/opt/airflow/dags\")
+              try:
+                  import test_dag
+                  print(\"✅ DAG imports successfully\")
+                  print(f\"DAG ID: {test_dag.dag.dag_id}\")
+                  print(f\"Task count: {len(test_dag.dag.tasks)}\")
+              except Exception as e:
+                  print(f\"❌ Import error: {e}\")
+                  import traceback
+                  traceback.print_exc()
+              "
+            else
+              echo "No test_dag.py found to test"
+            fi
+          '
+
+          echo -e "\n6. Check Airflow users:"
+          docker compose exec -T airflow-apiserver airflow users list || echo "Could not list users"
+
+      # Alternative simpler DAG execution test (more focused)
+      - name: Simple DAG execution test
+        run: |
+          echo "=== Simple DAG Execution Test ==="
+
+          # Simple credential test
+          echo "Testing API access..."
+          if curl -s -f -u "airflow:airflow" "http://localhost:8080/api/v1/version" >/dev/null 2>&1; then
+            CREDS="airflow:airflow"
+          elif curl -s -f -u "admin:admin" "http://localhost:8080/api/v1/version" >/dev/null 2>&1; then
+            CREDS="admin:admin"
+          else
+            echo "❌ Cannot access Airflow API with default credentials"
+            exit 1
+          fi
+          echo "✅ API accessible with credentials: $CREDS"
+
+          # List available DAGs
+          echo -e "\nListing DAGs..."
+          DAGS_JSON=$(curl -s -u "$CREDS" "http://localhost:8080/api/v1/dags")
+          DAG_COUNT=$(echo "$DAGS_JSON" | jq -r '.total_entries // 0')
+          echo "Found $DAG_COUNT DAG(s)"
+
+          if [ "$DAG_COUNT" -eq 0 ]; then
+            echo "❌ No DAGs available for testing"
+            exit 1
+          fi
+
+          # Get first available DAG
+          DAG_ID=$(echo "$DAGS_JSON" | jq -r '.dags[0].dag_id')
+          echo "Testing with DAG: $DAG_ID"
+
+          # Unpause DAG if needed
+          curl -s -X PATCH -u "$CREDS" \
+            -H "Content-Type: application/json" \
+            -d '{"is_paused": false}' \
+            "http://localhost:8080/api/v1/dags/$DAG_ID" >/dev/null
+
+          # Trigger DAG
+          echo "Triggering DAG..."
+          RUN_ID="test-$(date +%s)"
+          TRIGGER_RESP=$(curl -s -X POST -u "$CREDS" \
+            -H "Content-Type: application/json" \
+            -d "{\"dag_run_id\": \"$RUN_ID\"}" \
+            "http://localhost:8080/api/v1/dags/$DAG_ID/dagRuns")
+
+          if echo "$TRIGGER_RESP" | jq -e '.dag_run_id' >/dev/null; then
+            echo "✅ DAG triggered successfully"
+            
+            # Wait a bit and check status
+            sleep 30
+            STATUS=$(curl -s -u "$CREDS" "http://localhost:8080/api/v1/dags/$DAG_ID/dagRuns/$RUN_ID" | jq -r '.state')
+            echo "DAG run status after 30s: $STATUS"
+            
+            echo "✅ Basic DAG execution test completed"
+          else
+            echo "❌ Failed to trigger DAG"
+            echo "Response: $TRIGGER_RESP"
+            exit 1
+          fi
+
+      # Environment improvements you can add to your workflow
+      - name: Increase Docker resources (if needed)
+        run: |
+          # For GitHub Actions, we can't increase Docker resources,
+          # but we can optimize our containers to use less memory
+          echo "Current system resources:"
+          free -h
+          df -h
+
+      - name: Test DAG execution
+        run: |
+          echo "=== Testing DAG execution ==="
+
+          # Function to wait with timeout
+          wait_with_timeout() {
+            local timeout=$1
+            local check_command=$2
+            local description=$3
+            local count=0
+            
+            echo "Waiting for $description (timeout: ${timeout}s)..."
+            while [ $count -lt $timeout ]; do
+              if eval "$check_command"; then
+                echo "✅ $description completed successfully"
+                return 0
+              fi
+              sleep 5
+              count=$((count + 5))
+              echo "  Still waiting... ($count/${timeout}s)"
+            done
+            
+            echo "❌ Timeout waiting for $description"
+            return 1
+          }
+
+          # Step 1: Ensure admin user exists with known credentials
+          echo "1. Setting up admin user..."
+          docker compose exec -T airflow-apiserver bash -c '
+            # Try to create admin user (will fail if exists, that is OK)
+            airflow users create \
+              --role Admin \
+              --username admin \
+              --email admin@example.com \
+              --firstname Admin \
+              --lastname User \
+              --password admin 2>/dev/null || echo "User may already exist"
+            
+            # List users to verify
+            echo "Current users:"
+            airflow users list
+          '
+
+          # Step 2: Verify API access
+          echo -e "\n2. Verifying API access..."
+
+          # Test different credential combinations
+          CREDS_LIST="admin:admin airflow:airflow"
+          WORKING_CREDS=""
+
+          for creds in $CREDS_LIST; do
+            echo "Testing credentials: $creds"
+            if curl -s -f -u "$creds" "http://localhost:8080/api/v1/version" >/dev/null 2>&1; then
+              WORKING_CREDS="$creds"
+              echo "✅ Working credentials found: $creds"
+              break
+            fi
+          done
+
+          if [ -z "$WORKING_CREDS" ]; then
+            echo "❌ No working credentials found. Trying to diagnose..."
+            
+            # Check what authentication is configured
+            echo "Airflow configuration:"
+            docker compose exec -T airflow-apiserver airflow config get-value webserver authenticate 2>/dev/null || echo "Could not get auth config"
+            
+            # Check if webserver is responding
+            echo "Testing webserver response:"
+            curl -v http://localhost:8080/health 2>&1 | head -10
+            
+            echo "Available users:"
+            docker compose exec -T airflow-apiserver airflow users list 2>/dev/null || echo "Could not list users"
+            
+            exit 1
+          fi
+
+          # Step 3: Check for existing DAGs
+          echo -e "\n3. Checking existing DAGs..."
+
+          DAGS_RESPONSE=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags" 2>/dev/null)
+          DAG_COUNT=$(echo "$DAGS_RESPONSE" | jq -r '.total_entries // 0' 2>/dev/null)
+
+          echo "Found $DAG_COUNT existing DAG(s)"
+
+          if [ "$DAG_COUNT" -eq 0 ]; then
+            echo "No DAGs found. Let's wait a bit for DAG scanning..."
+            
+            # Wait for DAGs to be scanned (our test DAG should be there)
+            wait_with_timeout 60 '
+              DAGS_RESPONSE=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags" 2>/dev/null)
+              DAG_COUNT=$(echo "$DAGS_RESPONSE" | jq -r ".total_entries // 0" 2>/dev/null)
+              [ "$DAG_COUNT" -gt 0 ]
+            ' "DAG scanning"
+            
+            # Refresh DAG count
+            DAGS_RESPONSE=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags" 2>/dev/null)
+            DAG_COUNT=$(echo "$DAGS_RESPONSE" | jq -r '.total_entries // 0' 2>/dev/null)
+          fi
+
+          if [ "$DAG_COUNT" -eq 0 ]; then
+            echo "❌ Still no DAGs found after waiting. Checking DAG directory..."
+            docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/
+            
+            echo "Checking for DAG parsing errors..."
+            docker compose exec -T airflow-apiserver bash -c '
+              python -c "
+              import sys
+              sys.path.append(\"/opt/airflow/dags\")
+              try:
+                  import test_dag
+                  print(\"✅ test_dag imported successfully\")
+                  print(f\"DAG ID: {test_dag.dag.dag_id}\")
+              except Exception as e:
+                  print(f\"❌ Error importing test_dag: {e}\")
+              "
+            '
+            exit 1
+          fi
+
+          # Step 4: Get available DAGs and select one for testing
+          echo -e "\n4. Selecting DAG for testing..."
+
+          AVAILABLE_DAGS=$(echo "$DAGS_RESPONSE" | jq -r '.dags[].dag_id' 2>/dev/null)
+          echo "Available DAGs:"
+          echo "$AVAILABLE_DAGS"
+
+          # Prefer test_dag if available, otherwise use first DAG
+          if echo "$AVAILABLE_DAGS" | grep -q "test_dag"; then
+            DAG_TO_TEST="test_dag"
+          else
+            DAG_TO_TEST=$(echo "$AVAILABLE_DAGS" | head -1)
+          fi
+
+          echo "Selected DAG for testing: $DAG_TO_TEST"
+
+          # Step 5: Ensure DAG is unpaused
+          echo -e "\n5. Ensuring DAG is unpaused..."
+
+          # Get current DAG state
+          DAG_DETAILS=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags/$DAG_TO_TEST" 2>/dev/null)
+          IS_PAUSED=$(echo "$DAG_DETAILS" | jq -r '.is_paused // true' 2>/dev/null)
+
+          if [ "$IS_PAUSED" = "true" ]; then
+            echo "DAG is paused, unpausing..."
+            UNPAUSE_RESULT=$(curl -s -X PATCH \
+              -u "$WORKING_CREDS" \
+              -H "Content-Type: application/json" \
+              -d '{"is_paused": false}' \
+              "http://localhost:8080/api/v1/dags/$DAG_TO_TEST" 2>/dev/null)
+            
+            if echo "$UNPAUSE_RESULT" | jq -e '.is_paused == false' >/dev/null 2>&1; then
+              echo "✅ DAG unpaused successfully"
+            else
+              echo "❌ Failed to unpause DAG: $UNPAUSE_RESULT"
+              exit 1
+            fi
+          else
+            echo "✅ DAG is already active"
+          fi
+
+          # Step 6: Trigger DAG run
+          echo -e "\n6. Triggering DAG run..."
+
+          TRIGGER_RESPONSE=$(curl -s -X POST \
+            -u "$WORKING_CREDS" \
+            -H "Content-Type: application/json" \
+            -d "{\"dag_run_id\": \"test-run-$(date +%s)\"}" \
+            "http://localhost:8080/api/v1/dags/$DAG_TO_TEST/dagRuns" 2>/dev/null)
+
+          DAG_RUN_ID=$(echo "$TRIGGER_RESPONSE" | jq -r '.dag_run_id // empty' 2>/dev/null)
+
+          if [ -n "$DAG_RUN_ID" ] && [ "$DAG_RUN_ID" != "null" ] && [ "$DAG_RUN_ID" != "empty" ]; then
+            echo "✅ DAG triggered successfully with run ID: $DAG_RUN_ID"
+          else
+            echo "❌ Failed to trigger DAG"
+            echo "Response: $TRIGGER_RESPONSE"
+            
+            # Additional debugging
+            echo "Checking DAG state..."
+            curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags/$DAG_TO_TEST" | jq '.'
+            exit 1
+          fi
+
+          # Step 7: Monitor execution (simplified)
+          echo -e "\n7. Monitoring DAG execution..."
+
+          wait_with_timeout 120 '
+            RUN_RESPONSE=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags/$DAG_TO_TEST/dagRuns/$DAG_RUN_ID" 2>/dev/null)
+            RUN_STATE=$(echo "$RUN_RESPONSE" | jq -r ".state // \"unknown\"" 2>/dev/null)
+            
+            echo "  Current state: $RUN_STATE"
+            
+            [ "$RUN_STATE" = "success" ] || [ "$RUN_STATE" = "failed" ]
+          ' "DAG execution completion"
+
+          # Step 8: Final status check
+          echo -e "\n8. Final status check..."
+
+          FINAL_RESPONSE=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags/$DAG_TO_TEST/dagRuns/$DAG_RUN_ID" 2>/dev/null)
+          FINAL_STATE=$(echo "$FINAL_RESPONSE" | jq -r '.state // "unknown"' 2>/dev/null)
+
+          echo "Final DAG run state: $FINAL_STATE"
+
+          # Get task instances
+          TASK_INSTANCES=$(curl -s -u "$WORKING_CREDS" "http://localhost:8080/api/v1/dags/$DAG_TO_TEST/dagRuns/$DAG_RUN_ID/taskInstances" 2>/dev/null)
+
+          if echo "$TASK_INSTANCES" | jq -e '.task_instances[]?' >/dev/null 2>&1; then
+            echo "Task statuses:"
+            echo "$TASK_INSTANCES" | jq -r '.task_instances[] | "  \(.task_id): \(.state)"' 2>/dev/null
+          fi
+
+          # Determine success
+          case "$FINAL_STATE" in
+            "success")
+              echo "🎉 DAG execution completed successfully!"
+              ;;
+            "failed")
+              echo "❌ DAG execution failed"
+              
+              # Show failed task details
+              echo "Failed tasks:"
+              echo "$TASK_INSTANCES" | jq -r '.task_instances[] | select(.state == "failed") | "  \(.task_id): \(.state)"' 2>/dev/null
+              exit 1
+              ;;
+            *)
+              echo "⚠️  DAG execution ended with state: $FINAL_STATE"
+              if [ "$FINAL_STATE" != "success" ]; then
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "✅ DAG execution test completed successfully!"
+
       - name: Test DAG execution
         run: |
 
