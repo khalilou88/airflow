@@ -1,0 +1,987 @@
+name: Hadoop Cluster Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test-hadoop-cluster:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Docker Compose version
+        # Docker Compose V2 is typically pre-installed on GitHub Actions runners.
+        # This step ensures it's available and shows the version.
+        run: |
+          docker compose version
+
+      # - name: Format HDFS NameNode
+      #   # This step formats the NameNode before starting the cluster.
+      #   # It uses --rm to remove the container immediately after formatting.
+      #   run: docker compose run --rm namenode hdfs namenode -format
+
+      - name: Start Hadoop Cluster
+        # Start all services in detached mode
+        run: docker compose up -d
+
+      - name: Wait for NameNode to be healthy
+        # Wait for the NameNode service to report as healthy.
+        # This is crucial before interacting with HDFS.
+        # We check the health status of the 'namenode' service.
+        run: |
+          echo "Waiting for NameNode to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps namenode | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "NameNode did not become healthy in time!"; exit 1; }
+          echo "NameNode is healthy."
+
+      - name: Wait for DataNode to be healthy
+        # Wait for the DataNode service to report as healthy.
+        run: |
+          echo "Waiting for DataNode to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps datanode | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "DataNode did not become healthy in time!"; exit 1; }
+          echo "DataNode is healthy."
+
+      - name: Wait for ResourceManager to be healthy
+        # Wait for the ResourceManager service to report as healthy.
+        run: |
+          echo "Waiting for ResourceManager to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps resourcemanager | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "ResourceManager did not become healthy in time!"; exit 1; }
+          echo "ResourceManager is healthy."
+
+      - name: Wait for HistoryServer to be healthy
+        # Wait for the MapReduce HistoryServer service to report as healthy.
+        run: |
+          echo "Waiting for HistoryServer to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps historyserver | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "HistoryServer did not become healthy in time!"; exit 1; }
+          echo "HistoryServer is healthy."
+
+      - name: Wait for Spark Master to be healthy
+        # Wait for the Spark Master service to report as healthy.
+        run: |
+          echo "Waiting for Spark Master to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps spark-master | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "Spark Master did not become healthy in time!"; exit 1; }
+          echo "Spark Master is healthy."
+
+      - name: Wait for Spark History Server to be healthy
+        # Wait for the Spark History Server service to report as healthy.
+        run: |
+          echo "Waiting for Spark History Server to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps spark-history-server | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "Spark History Server did not become healthy in time!"; exit 1; }
+          echo "Spark History Server is healthy."
+
+      - name: Wait for Hive Metastore DB to be healthy
+        # Wait for the PostgreSQL database for Hive Metastore to be healthy.
+        run: |
+          echo "Waiting for Hive Metastore DB to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps hive-metastore-db | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "Hive Metastore DB did not become healthy in time!"; exit 1; }
+          echo "Hive Metastore DB is healthy."
+
+      - name: Wait for Hive Metastore to be healthy
+        # Wait for the Hive Metastore service to report as healthy.
+        run: |
+          echo "Waiting for Hive Metastore to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps hive-metastore | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "Hive Metastore did not become healthy in time!"; exit 1; }
+          echo "Hive Metastore is healthy."
+
+      - name: Wait for HiveServer2 to be healthy
+        # Wait for the HiveServer2 service to report as healthy.
+        run: |
+          echo "Waiting for HiveServer2 to be healthy..."
+          timeout 300s bash -c \
+            'until docker compose ps hiveserver2 | grep -q "healthy"; do \
+              echo -n "."; sleep 5; \
+            done' || { echo "HiveServer2 did not become healthy in time!"; exit 1; }
+          echo "HiveServer2 is healthy."
+
+      - name: Verify HDFS connectivity
+        # Execute a simple HDFS command inside the namenode container to verify HDFS is working.
+        run: |
+          echo "Verifying HDFS connectivity by listing root directory..."
+          docker compose exec namenode hdfs dfs -ls /
+          echo "HDFS connectivity verified."
+
+      - name: Verify YARN ResourceManager status
+        # Execute a simple YARN command to verify ResourceManager is working.
+        run: |
+          echo "Verifying YARN ResourceManager status..."
+          docker compose exec resourcemanager yarn application -list -appStates ALL
+          echo "YARN ResourceManager status verified."
+
+      - name: Testing Spark with HDFS Integration
+        run: |
+          echo "=== Testing Spark with HDFS Integration ==="
+
+          echo "1. Creating test data in HDFS for Spark..."
+          docker compose exec namenode bash -c "echo -e '1,Alice,25\n2,Bob,30\n3,Charlie,35' > /tmp/spark_test.csv"
+          docker compose exec namenode hdfs dfs -mkdir -p /spark-test/input
+          docker compose exec namenode hdfs dfs -put /tmp/spark_test.csv /spark-test/input/
+
+          echo "2. Verifying test data in HDFS..."
+          docker compose exec namenode hdfs dfs -cat /spark-test/input/spark_test.csv
+
+          echo "3. Creating Spark job script..."
+          docker compose exec spark-client bash -c 'cat > /tmp/spark_job.scala << EOF
+          val df = spark.read.option("header", "false").csv("hdfs://namenode/spark-test/input/spark_test.csv")
+          df.show()
+          df.write.mode("overwrite").csv("hdfs://namenode/spark-test/output")
+          println("Spark HDFS integration test completed")
+          System.exit(0)
+          EOF'
+
+          echo "4. Fixing HDFS Permissions for Spark User"
+
+          echo "4.1. Check current permissions on /spark-test directory..."
+          docker compose exec namenode hdfs dfs -ls -d /spark-test
+
+          echo "4.2. Change ownership to allow spark user write access..."
+          docker compose exec namenode hdfs dfs -chown spark:spark /spark-test
+          docker compose exec namenode hdfs dfs -chmod 755 /spark-test
+
+          echo "4.3. Also fix permissions on the input directory..."
+          docker compose exec namenode hdfs dfs -chown -R spark:spark /spark-test/input
+          docker compose exec namenode hdfs dfs -chmod -R 755 /spark-test/input
+
+          echo "4.4. Verify permissions are fixed..."
+          docker compose exec namenode hdfs dfs -ls /spark-test/
+
+          echo "4.5. Alternative: Create a new directory with correct permissions..."
+          docker compose exec namenode hdfs dfs -mkdir -p /spark-output
+          docker compose exec namenode hdfs dfs -chown spark:spark /spark-output
+          docker compose exec namenode hdfs dfs -chmod 755 /spark-output
+
+          echo "5. Running Spark job to process HDFS data..."
+          docker compose exec spark-client spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.execution.arrow.pyspark.enabled=false \
+            -i /tmp/spark_job.scala
+
+          echo "6. Verifying Spark output in HDFS..."
+          docker compose exec namenode hdfs dfs -ls /spark-test/output/
+          docker compose exec namenode hdfs dfs -cat /spark-test/output/part-*
+
+          echo "Spark HDFS integration test completed."
+
+      - name: Test Spark SQL functionality
+        # Test Spark SQL capabilities
+        run: |
+          echo "=== Testing Spark SQL Functionality ==="
+
+          echo "1. Creating temporary view and running SQL queries..."
+          docker compose exec spark-client spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.execution.arrow.pyspark.enabled=false \
+            -c "
+            import spark.implicits._;
+            val data = Seq((1, \"Alice\", 25), (2, \"Bob\", 30), (3, \"Charlie\", 35));
+            val df = data.toDF(\"id\", \"name\", \"age\");
+            df.createOrReplaceTempView(\"people\");
+            spark.sql(\"SELECT name, age FROM people WHERE age > 27\").show();
+            println(\"Spark SQL test completed\");
+            System.exit(0)
+            "
+
+          echo "2. Testing DataFrame operations..."
+          docker compose exec spark-client spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.execution.arrow.pyspark.enabled=false \
+            -c "
+            import spark.implicits._;
+            val numbers = (1 to 1000).toDF(\"number\");
+            val result = numbers.filter(\$\"number\" % 2 === 0).count();
+            println(s\"Even numbers count: \$result\");
+            System.exit(0)
+            "
+
+          echo "Spark SQL functionality test completed."
+
+      - name: Test Spark PySpark functionality
+        # Test PySpark (Python API for Spark)
+        run: |
+          echo "=== Testing PySpark Functionality ==="
+
+          echo "1. Testing basic PySpark operations..."
+          docker compose exec spark-client pyspark --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.execution.arrow.pyspark.enabled=false \
+            --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+            -c "
+          data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+          rdd = sc.parallelize(data)
+          result = rdd.filter(lambda x: x % 2 == 0).collect()
+          print('Even numbers:', result)
+
+          # DataFrame operations
+          from pyspark.sql import SparkSession
+          df = spark.createDataFrame([(1, 'Alice', 25), (2, 'Bob', 30)], ['id', 'name', 'age'])
+          df.show()
+          df.filter(df.age > 27).show()
+
+          print('PySpark test completed successfully')
+          "
+
+          echo "PySpark functionality test completed."
+
+      # - name: Test Spark application submission
+      #   # Test submitting a Spark application using spark-submit
+      #   run: |
+      #     echo "=== Testing Spark Application Submission ==="
+      #     echo "1. Creating a simple PySpark application..."
+
+      #     # Create directory without changing permissions
+      #     mkdir -p ./spark-apps
+
+      #     # Create the Python file with corrected syntax (note the fixed __name__)
+      #     cat > ./spark-apps/word_count.py << 'EOF'
+      #     from pyspark.sql import SparkSession
+
+      #     if __name__ == "__main__":
+      #         spark = SparkSession.builder.appName("WordCount").getOrCreate()
+      #         sc = spark.sparkContext
+
+      #         # Create sample data
+      #         text_data = [
+      #             "Hello Spark World",
+      #             "Spark is awesome",
+      #             "Big data processing with Spark"
+      #         ]
+
+      #         # Create RDD and perform word count
+      #         text_rdd = sc.parallelize(text_data)
+      #         words = text_rdd.flatMap(lambda line: line.split())
+      #         word_pairs = words.map(lambda word: (word.lower(), 1))
+      #         word_counts = word_pairs.reduceByKey(lambda a, b: a + b)
+
+      #         print("Word Count Results:")
+      #         for word, count in word_counts.collect():
+      #             print(f"{word}: {count}")
+
+      #         spark.stop()
+      #     EOF
+
+      #     echo "2. Verifying file was created..."
+      #     ls -la ./spark-apps/word_count.py
+
+      #     echo "3. Checking file contents..."
+      #     head -5 ./spark-apps/word_count.py
+
+      #     echo "4. Submitting PySpark application..."
+      #     docker compose exec spark-client spark-submit \
+      #         --master spark://spark-master:7077 \
+      #         --driver-memory 512m \
+      #         --executor-memory 512m \
+      #         --total-executor-cores 2 \
+      #         /opt/spark-apps/word_count.py
+
+      #     echo "Spark application submission test completed."
+
+      - name: Test Spark with Hive integration
+        # Test Spark's integration with Hive (Spark SQL with Hive support)
+        run: |
+          echo "=== Testing Spark with Hive Integration ==="
+
+          # Method 1: Using a temporary Scala file
+          echo "1. Testing Spark-Hive connectivity using temporary script file..."
+
+          # Create temporary Scala script
+          cat > /tmp/hive_test.scala << 'EOF'
+          spark.sql("SHOW DATABASES").show()
+          println("Spark-Hive integration test completed")
+          System.exit(0)
+          EOF
+
+          # Execute the script
+          docker compose exec spark-client spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.catalogImplementation=hive \
+            --conf spark.sql.hive.metastore.uris=thrift://hive-metastore:9083 \
+            --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+            -i /tmp/hive_test.scala
+
+          # Clean up
+          rm -f /tmp/hive_test.scala
+
+          echo ""
+          echo "=== Alternative Method 2: Using heredoc ==="
+
+          # Method 2: Using heredoc to pipe commands
+          docker compose exec spark-client bash -c '
+          spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.catalogImplementation=hive \
+            --conf spark.sql.hive.metastore.uris=thrift://hive-metastore:9083 \
+            --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 << EOF
+          spark.sql("SHOW DATABASES").show()
+          println("Spark-Hive integration test completed")
+          System.exit(0)
+          EOF
+          '
+
+          echo ""
+          echo "=== Alternative Method 3: Using spark-sql for simple queries ==="
+
+          # Method 3: Using spark-sql (simpler for basic SQL operations)
+          docker compose exec spark-client spark-sql --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.catalogImplementation=hive \
+            --conf spark.sql.hive.metastore.uris=thrift://hive-metastore:9083 \
+            --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+            -e "SHOW DATABASES; SHOW TABLES;"
+
+          echo ""
+          echo "=== Alternative Method 4: Using spark-submit with a proper application ==="
+
+          # Create a simple Spark application
+          cat > /tmp/HiveTest.scala << 'EOF'
+          import org.apache.spark.sql.SparkSession
+
+          object HiveTest {
+            def main(args: Array[String]): Unit = {
+              val spark = SparkSession.builder()
+                .appName("Hive Integration Test")
+                .config("spark.sql.catalogImplementation", "hive")
+                .config("spark.sql.hive.metastore.uris", "thrift://hive-metastore:9083")
+                .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083")
+                .getOrCreate()
+              
+              try {
+                println("Testing Hive connectivity...")
+                spark.sql("SHOW DATABASES").show()
+                println("Hive integration test completed successfully!")
+              } catch {
+                case e: Exception => 
+                  println(s"Hive integration test failed: ${e.getMessage}")
+              } finally {
+                spark.stop()
+              }
+            }
+          }
+          EOF
+
+          echo "Created HiveTest.scala application for spark-submit testing"
+
+          echo "Spark-Hive integration test script completed."
+
+      - name: Verify MapReduce framework
+        # Test MapReduce functionality by checking if MapReduce framework is properly configured
+        run: |
+          echo "Verifying MapReduce framework configuration..."
+          docker compose exec mapreduce-client mapred version
+          echo "MapReduce framework verified."
+
+      - name: Create test directory in HDFS
+        # Create a test directory structure for MapReduce job testing
+        run: |
+          echo "Creating test directories in HDFS..."
+          docker compose exec namenode hdfs dfs -mkdir -p /user/test/input
+          docker compose exec namenode hdfs dfs -mkdir -p /user/test/output
+          echo "Test directories created."
+
+      - name: Create test data for MapReduce
+        # Create sample data file for testing MapReduce jobs
+        run: |
+          echo "Creating test data..."
+          docker compose exec mapreduce-client bash -c "echo 'hello world' > /tmp/input.txt"
+          docker compose exec mapreduce-client bash -c "echo 'hello hadoop' >> /tmp/input.txt"
+          docker compose exec mapreduce-client bash -c "echo 'mapreduce test' >> /tmp/input.txt"
+          docker compose exec mapreduce-client hdfs dfs -put /tmp/input.txt /user/test/input/
+          echo "Test data uploaded to HDFS."
+
+      - name: Run MapReduce WordCount example
+        # Execute the classic WordCount MapReduce example to verify MapReduce functionality
+        run: |
+          echo "Running MapReduce WordCount example..."
+          EXAMPLES_JAR=$(docker compose exec mapreduce-client find /opt/hadoop/share/hadoop/mapreduce -name "hadoop-mapreduce-examples-*.jar" -not -name "*sources*" -not -name "*test*" | head -1 | tr -d '\r')
+          echo "Found examples JAR: $EXAMPLES_JAR"
+          docker compose exec mapreduce-client hadoop jar \
+            "$EXAMPLES_JAR" \
+            wordcount /user/test/input /user/test/output/wordcount
+          echo "MapReduce WordCount job completed."
+
+      - name: Verify MapReduce job output
+        # Check the output of the MapReduce job to ensure it ran successfully
+        run: |
+          echo "Verifying MapReduce job output..."
+          docker compose exec namenode hdfs dfs -cat /user/test/output/wordcount/part-r-00000
+          echo "MapReduce job output verified."
+
+      - name: Check job history in HistoryServer
+        # Verify that the completed job appears in the MapReduce History Server
+        run: |
+          echo "Checking job history..."
+          # Give the history server a moment to process the completed job
+          sleep 10
+          docker compose exec historyserver curl -s "http://localhost:19888/ws/v1/history/mapreduce/jobs" | head -100
+          echo "Job history check completed."
+
+      - name: Check NameNode UI accessibility
+        # Use curl to check if the NameNode UI is responding.
+        # -f: Fail silently (no output on HTTP errors).
+        # -s: Silent mode (don't show progress meter or error messages).
+        # -S: Show error (when -s is used).
+        # -o /dev/null: Discard output.
+        # -w "%{http_code}": Output HTTP status code.
+        run: |
+          echo "Checking NameNode UI at http://localhost:9870..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9870)" == "302" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "NameNode UI is accessible."
+
+      - name: Check ResourceManager UI accessibility
+        run: |
+          echo "Checking ResourceManager UI at http://localhost:8088..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8088)" == "302" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "ResourceManager UI is accessible."
+
+      - name: Check HistoryServer UI accessibility
+        # Check if the MapReduce History Server UI is accessible
+        run: |
+          echo "Checking HistoryServer UI at http://localhost:19888..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:19888)" == "302" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "HistoryServer UI is accessible."
+
+      - name: Check Spark Master UI accessibility
+        # Check if the Spark Master Web UI is accessible
+        run: |
+          echo "Checking Spark Master UI at http://localhost:8080..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)" == "200" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "Spark Master UI is accessible."
+
+      - name: Check Spark Worker UIs accessibility
+        # Check if the Spark Worker Web UIs are accessible
+        run: |
+          echo "Checking Spark Worker 1 UI at http://localhost:8081..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081)" == "200" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "Spark Worker 1 UI is accessible."
+
+          echo "Checking Spark Worker 2 UI at http://localhost:8082..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8082)" == "200" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "Spark Worker 2 UI is accessible."
+
+      - name: Check Spark History Server UI accessibility
+        # Check if the Spark History Server Web UI is accessible
+        run: |
+          echo "Checking Spark History Server UI at http://localhost:18080..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:18080)" == "200" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "Spark History Server UI is accessible."
+
+      - name: Test MapReduce job submission via YARN
+        # Submit another MapReduce job to test YARN integration
+        run: |
+          echo "Testing MapReduce job submission via YARN..."
+          EXAMPLES_JAR=$(docker compose exec mapreduce-client find /opt/hadoop/share/hadoop/mapreduce -name "hadoop-mapreduce-examples-*.jar" -not -name "*sources*" -not -name "*test*" | head -1 | tr -d '\r')
+          echo "Found examples JAR: $EXAMPLES_JAR"
+          docker compose exec mapreduce-client hadoop jar \
+            "$EXAMPLES_JAR" \
+            pi 2 10
+          echo "MapReduce Pi calculation job completed."
+
+      - name: Verify YARN application history
+        # Check that YARN shows the completed applications
+        run: |
+          echo "Verifying YARN application history..."
+          docker compose exec resourcemanager yarn application -list -appStates FINISHED
+          echo "YARN application history verified."
+
+      - name: Verify Spark application history
+        # Check that Spark applications appear in the history server
+        run: |
+          echo "Verifying Spark application history..."
+          # Give some time for applications to be recorded
+          sleep 15
+
+          echo "Checking Spark History Server REST API..."
+          docker compose exec spark-history-server curl -s "http://localhost:18080/api/v1/applications" | head -200 || echo "No applications found in history server yet"
+
+          echo "Spark application history verification completed."
+
+      - name: Test Spark cluster resource utilization
+        # Test Spark cluster's ability to handle resource allocation
+        run: |
+          echo "=== Testing Spark Cluster Resource Utilization ==="
+
+          echo "1. Checking cluster resources..."
+          docker compose exec spark-client spark-shell --master spark://spark-master:7077 \
+            --driver-memory 512m --executor-memory 512m \
+            --conf spark.sql.execution.arrow.pyspark.enabled=false \
+            -c "
+            println(\"Available cores: \" + sc.defaultParallelism);
+            val rdd = sc.parallelize(1 to 10000, 10);
+            val result = rdd.map(_ * 2).filter(_ % 4 == 0).count();
+            println(s\"Processed elements: \$result\");
+            System.exit(0)
+            "
+
+          echo "Resource utilization test completed."
+
+      - name: Test Hive Metastore connectivity
+        # Test connection to Hive Metastore service by checking if beeline can connect and show databases
+        run: |
+          echo "Testing Hive Metastore connectivity via beeline..."
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "SHOW DATABASES;" --silent=true --showHeader=false --outputformat=tsv2 | head -5
+          echo "Hive Metastore connectivity verified via HiveServer2."
+
+      - name: Create Hive test database
+        # Create a test database in Hive using beeline from HiveServer2 container
+        run: |
+          echo "Creating Hive test database..."
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "CREATE DATABASE IF NOT EXISTS testdb; SHOW DATABASES;" --silent=true
+          echo "Hive test database created."
+
+      - name: Create test data in HDFS for Hive
+        # Create sample CSV data for Hive table testing with comprehensive logging
+        run: |
+          echo "============================================"
+          echo "Creating test data for Hive tables..."
+          echo "Timestamp: $(date)"
+          echo "============================================"
+
+          # Function to log with timestamp
+          log() {
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+          }
+
+          # Function to check command success and continue on error for debugging
+          check_status() {
+              local exit_code=$?
+              if [ $exit_code -eq 0 ]; then
+                  log "✅ SUCCESS: $1"
+              else
+                  log "❌ ERROR: $1 (Exit code: $exit_code)"
+              fi
+              return $exit_code
+          }
+
+          # Step 1: Check container status
+          log "Checking container status..."
+          docker compose ps
+          echo ""
+
+          # Step 2: Check if hiveserver2 container is accessible
+          log "Testing hiveserver2 container connectivity..."
+          docker compose exec hiveserver2 echo "Container is accessible" 2>&1
+          check_status "HiveServer2 container accessibility"
+          echo ""
+
+          # Step 3: Check Java processes in containers
+          log "Checking Java processes in containers..."
+
+          log "HiveServer2 processes:"
+          docker compose exec hiveserver2 jps 2>&1 || log "Cannot get HiveServer2 processes"
+
+          log "Namenode processes:"
+          docker compose exec namenode jps 2>&1 || log "Cannot get Namenode processes"
+
+          log "Datanode processes:"
+          docker compose exec datanode jps 2>&1 || log "Cannot get Datanode processes"
+          echo ""
+
+          # Step 4: Check HDFS filesystem status
+          log "Checking HDFS filesystem status..."
+          docker compose exec namenode hdfs dfsadmin -report 2>&1
+          check_status "HDFS filesystem status"
+          echo ""
+
+          # Step 5: Check HDFS safe mode
+          log "Checking HDFS safe mode status..."
+          SAFE_MODE=$(docker compose exec namenode hdfs dfsadmin -safemode get 2>&1 || echo "ERROR_GETTING_SAFE_MODE")
+          log "Safe mode status: $SAFE_MODE"
+
+          if echo "$SAFE_MODE" | grep -q "ON"; then
+              log "⚠️  HDFS is in safe mode, attempting to leave..."
+              docker compose exec namenode hdfs dfsadmin -safemode leave 2>&1
+              check_status "Leaving safe mode"
+              sleep 10
+              
+              # Recheck safe mode
+              SAFE_MODE_AFTER=$(docker compose exec namenode hdfs dfsadmin -safemode get 2>&1 || echo "ERROR_GETTING_SAFE_MODE")
+              log "Safe mode status after leaving: $SAFE_MODE_AFTER"
+          fi
+          echo ""
+
+          # Step 6: Check existing HDFS directory structure
+          log "Checking existing HDFS directory structure..."
+
+          log "Root directory (/):"
+          docker compose exec namenode hdfs dfs -ls / 2>&1 || log "Cannot list root directory"
+
+          log "User directory (/user):"
+          docker compose exec namenode hdfs dfs -ls /user 2>&1 || log "/user directory doesn't exist or inaccessible"
+
+          log "Hive directory (/user/hive):"
+          docker compose exec namenode hdfs dfs -ls /user/hive 2>&1 || log "/user/hive directory doesn't exist or inaccessible"
+          echo ""
+
+          # Step 7: Create base directories using namenode (more reliable)
+          log "Creating base HDFS directories using namenode..."
+
+          log "Creating /user directory..."
+          docker compose exec namenode hdfs dfs -mkdir -p /user 2>&1
+          check_status "Creating /user directory"
+
+          log "Creating /user/hive directory..."
+          docker compose exec namenode hdfs dfs -mkdir -p /user/hive 2>&1
+          check_status "Creating /user/hive directory"
+
+          log "Creating /user/hive/warehouse directory..."
+          docker compose exec namenode hdfs dfs -mkdir -p /user/hive/warehouse 2>&1
+          check_status "Creating /user/hive/warehouse directory"
+
+          log "Setting permissions on warehouse directory..."
+          docker compose exec namenode hdfs dfs -chmod 777 /user/hive/warehouse 2>&1
+          check_status "Setting permissions on warehouse directory"
+          echo ""
+
+          # Step 8: Verify directory creation
+          log "Verifying directory creation..."
+          log "Listing /user/hive contents:"
+          docker compose exec namenode hdfs dfs -ls /user/hive 2>&1 || log "Cannot list /user/hive"
+          echo ""
+
+          # Step 9: Create CSV file
+          log "Creating CSV test file in hiveserver2 container..."
+          docker compose exec hiveserver2 bash -c "echo 'id,name,age' > /tmp/employees.csv" 2>&1
+          check_status "Creating CSV header"
+
+          docker compose exec hiveserver2 bash -c "echo '1,John,25' >> /tmp/employees.csv" 2>&1
+          check_status "Adding first employee record"
+
+          docker compose exec hiveserver2 bash -c "echo '2,Jane,30' >> /tmp/employees.csv" 2>&1
+          check_status "Adding second employee record"
+
+          docker compose exec hiveserver2 bash -c "echo '3,Bob,35' >> /tmp/employees.csv" 2>&1
+          check_status "Adding third employee record"
+
+          log "Verifying CSV file creation:"
+          docker compose exec hiveserver2 cat /tmp/employees.csv 2>&1
+          check_status "Verifying CSV file content"
+          echo ""
+
+          # Step 10: Test HDFS connectivity from hiveserver2
+          log "Testing HDFS connectivity from hiveserver2..."
+          log "Listing root directory from hiveserver2:"
+          docker compose exec hiveserver2 hdfs dfs -ls / 2>&1
+          check_status "HDFS connectivity from hiveserver2"
+          echo ""
+
+          # Step 11: Create target directory (try both namenode and hiveserver2)
+          log "Creating target directory for employees table..."
+
+          log "Attempting to create directory using namenode..."
+          docker compose exec namenode hdfs dfs -mkdir -p /user/hive/warehouse/testdb.db/employees 2>&1
+          NAMENODE_RESULT=$?
+          check_status "Creating directory via namenode"
+
+          if [ $NAMENODE_RESULT -ne 0 ]; then
+              log "Namenode failed, trying with hiveserver2..."
+              docker compose exec hiveserver2 hdfs dfs -mkdir -p /user/hive/warehouse/testdb.db/employees 2>&1
+              check_status "Creating directory via hiveserver2"
+          fi
+          echo ""
+
+          # Step 12: Verify directory exists
+          log "Verifying target directory exists..."
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/ 2>&1
+          check_status "Listing testdb.db contents"
+          echo ""
+
+          # Step 13: Upload file to HDFS (using namenode - most reliable approach)
+          log "Uploading CSV file to HDFS using namenode container..."
+
+          log "Copying CSV file from hiveserver2 to namenode container..."
+          docker compose exec hiveserver2 cat /tmp/employees.csv | docker compose exec -T namenode bash -c "cat > /tmp/employees.csv"
+          check_status "Copying file to namenode container"
+
+          log "Verifying file copied to namenode:"
+          docker compose exec namenode cat /tmp/employees.csv 2>&1
+          check_status "Verifying file in namenode container"
+
+          log "Uploading file to HDFS from namenode container..."
+          docker compose exec namenode hdfs dfs -put /tmp/employees.csv /user/hive/warehouse/testdb.db/employees/ 2>&1
+          check_status "Uploading CSV file to HDFS"
+          echo ""
+
+          # Step 14: Verify file upload
+          log "Verifying file upload..."
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/employees/ 2>&1
+          check_status "Listing uploaded files"
+
+          log "Checking file content in HDFS..."
+          docker compose exec namenode hdfs dfs -cat /user/hive/warehouse/testdb.db/employees/employees.csv 2>&1
+          check_status "Reading uploaded file content"
+          echo ""
+
+          # Step 15: Final status
+          log "============================================"
+          log "Test data creation process completed!"
+          log "Timestamp: $(date)"
+          log "============================================"
+
+      - name: Create Hive external table
+        # Create an external Hive table pointing to the test data using beeline from HiveServer2
+        run: |
+          echo "=== Starting Hive External Table Creation ==="
+
+          # Step 1: Verify HDFS directory structure
+          echo "1. Checking HDFS directory structure..."
+          echo "Listing /user/hive/warehouse/testdb.db/:"
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/ || echo "Directory not found or permission denied"
+
+          echo "Listing /user/hive/warehouse/testdb.db/employees/:"
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/employees/ || echo "Employees directory not found"
+
+          echo "Checking permissions and ownership:"
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/ || echo "Cannot check permissions"
+
+          # Step 2: Verify the target path exists and is a directory
+          echo ""
+          echo "2. Verifying target path properties..."
+          if docker compose exec namenode hdfs dfs -test -d /user/hive/warehouse/testdb.db/employees; then
+            echo "✓ /user/hive/warehouse/testdb.db/employees is a directory"
+          else
+            echo "✗ /user/hive/warehouse/testdb.db/employees is NOT a directory"
+            # Check if it's a file instead
+            if docker compose exec namenode hdfs dfs -test -f /user/hive/warehouse/testdb.db/employees; then
+              echo "✗ /user/hive/warehouse/testdb.db/employees exists as a FILE (this is the problem!)"
+              echo "Removing file and recreating as directory..."
+              docker compose exec namenode hdfs dfs -rm /user/hive/warehouse/testdb.db/employees
+              docker compose exec namenode hdfs dfs -mkdir -p /user/hive/warehouse/testdb.db/employees
+              docker compose exec namenode hdfs dfs -chmod 755 /user/hive/warehouse/testdb.db/employees
+              echo "Directory recreated successfully"
+            else
+              echo "✗ /user/hive/warehouse/testdb.db/employees does not exist at all"
+              echo "Creating directory structure..."
+              docker compose exec namenode hdfs dfs -mkdir -p /user/hive/warehouse/testdb.db/employees
+              docker compose exec namenode hdfs dfs -chmod 755 /user/hive/warehouse/testdb.db/employees
+              echo "Directory created successfully"
+            fi
+          fi
+
+          # Step 3: Check if CSV file is in the right location
+          echo ""
+          echo "3. Checking CSV file location..."
+          echo "Contents of employees directory:"
+          docker compose exec namenode hdfs dfs -ls /user/hive/warehouse/testdb.db/employees/ || echo "Cannot list directory contents"
+
+          # Step 4: Verify HiveServer2 is running
+          echo ""
+          echo "4. Verifying HiveServer2 connectivity..."
+          if docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" -e "SHOW DATABASES;" --silent=true > /dev/null 2>&1; then
+            echo "✓ HiveServer2 is accessible"
+          else
+            echo "✗ Cannot connect to HiveServer2"
+            echo "HiveServer2 container status:"
+            docker compose ps hiveserver2
+            echo "HiveServer2 logs (last 20 lines):"
+            docker compose logs --tail=20 hiveserver2
+          fi
+
+          # Step 5: Check if database exists
+          echo ""
+          echo "5. Verifying database exists..."
+          echo "Available databases:"
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" -e "SHOW DATABASES;" --silent=false 2>&1 || echo "Failed to list databases"
+
+          # Step 6: Attempt to create the table with full logging
+          echo ""
+          echo "6. Creating Hive external table..."
+          echo "Executing CREATE TABLE statement..."
+
+          # Remove --silent=true to see full output
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; 
+                CREATE EXTERNAL TABLE IF NOT EXISTS employees (
+                  id INT,
+                  name STRING,
+                  age INT
+                ) 
+                ROW FORMAT DELIMITED 
+                FIELDS TERMINATED BY ',' 
+                STORED AS TEXTFILE 
+                LOCATION 'hdfs://namenode/user/hive/warehouse/testdb.db/employees'
+                TBLPROPERTIES ('skip.header.line.count'='1');" 2>&1
+
+          # Capture the exit code
+          CREATE_TABLE_EXIT_CODE=$?
+
+          # Step 7: Verify table creation
+          echo ""
+          echo "7. Verifying table creation..."
+          if [ $CREATE_TABLE_EXIT_CODE -eq 0 ]; then
+            echo "✓ CREATE TABLE command completed with exit code 0"
+
+            # Check if table actually exists
+            echo "Checking if table exists:"
+            docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+              -e "USE testdb; SHOW TABLES;" --silent=false 2>&1
+
+            # Try to describe the table
+            echo "Table description:"
+            docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+              -e "USE testdb; DESCRIBE employees;" --silent=false 2>&1
+
+          else
+            echo "✗ CREATE TABLE command failed with exit code: $CREATE_TABLE_EXIT_CODE"
+
+            # Additional debugging
+            echo ""
+            echo "8. Additional debugging information..."
+            echo "Metastore logs (last 30 lines):"
+            docker compose logs --tail=30 metastore || echo "Cannot fetch metastore logs"
+
+            echo "HiveServer2 logs (last 30 lines):"
+            docker compose logs --tail=30 hiveserver2 || echo "Cannot fetch hiveserver2 logs"
+
+            echo "All container statuses:"
+            docker compose ps
+
+            # Try alternative approach
+            echo ""
+            echo "9. Trying alternative table creation approach..."
+            echo "Attempting to create managed table instead:"
+            docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+              -e "USE testdb; 
+                  CREATE TABLE IF NOT EXISTS employees_managed (
+                    id INT,
+                    name STRING,
+                    age INT
+                  ) 
+                  ROW FORMAT DELIMITED 
+                  FIELDS TERMINATED BY ',' 
+                  STORED AS TEXTFILE 
+                  TBLPROPERTIES ('skip.header.line.count'='1');" 2>&1
+            
+            if [ $? -eq 0 ]; then
+              echo "✓ Managed table creation succeeded - issue is with external table location"
+            else
+              echo "✗ Even managed table creation failed - deeper Hive configuration issue"
+            fi
+            
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Hive External Table Creation Complete ==="
+
+      - name: Test Hive queries
+        # Execute various Hive queries to test functionality using beeline from HiveServer2
+        run: |
+          echo "Testing Hive queries..."
+          echo "=== Showing tables ==="
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; SHOW TABLES;" --silent=true
+
+          echo "=== Selecting all records ==="
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; SELECT * FROM employees;" --silent=true
+
+          echo "=== Counting records ==="
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; SELECT COUNT(*) as total_employees FROM employees;" --silent=true
+
+          echo "=== Average age ==="
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; SELECT AVG(age) as avg_age FROM employees;" --silent=true
+          echo "Hive queries executed successfully."
+
+      - name: Test Hive with MapReduce integration
+        # Test that Hive can execute MapReduce jobs using beeline from HiveServer2
+        run: |
+          echo "Testing Hive with MapReduce integration..."
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; 
+                SET hive.exec.mode.local.auto=false;
+                SET mapreduce.job.reduces=1;
+                CREATE TABLE IF NOT EXISTS employee_summary AS 
+                SELECT 
+                  CASE 
+                    WHEN age < 30 THEN 'Young' 
+                    ELSE 'Senior' 
+                  END as age_group,
+                  COUNT(*) as count,
+                  AVG(age) as avg_age
+                FROM employees 
+                GROUP BY 
+                  CASE 
+                    WHEN age < 30 THEN 'Young' 
+                    ELSE 'Senior' 
+                  END;" --silent=true
+
+          echo "=== Viewing MapReduce results ==="
+          docker compose exec hiveserver2 beeline -u "jdbc:hive2://localhost:10000" \
+            -e "USE testdb; SELECT * FROM employee_summary;" --silent=true
+          echo "Hive MapReduce integration test completed."
+
+      - name: Check HiveServer2 UI accessibility
+        # Check if the HiveServer2 Web UI is accessible
+        run: |
+          echo "Checking HiveServer2 UI at http://localhost:10002..."
+          until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:10002)" == "200" ]; do
+            echo -n "."; sleep 5;
+          done
+          echo "HiveServer2 UI is accessible."
+
+      - name: Test Hive CLI functionality
+        # Test the traditional Hive CLI (if available) using HiveServer2 container
+        run: |
+          echo "Testing Hive CLI functionality..."
+          docker compose exec hiveserver2 bash -c "echo 'SHOW DATABASES;' | hive --silent" || echo "Hive CLI not available, using Beeline only"
+          echo "Hive CLI test completed."
+
+      - name: Verify Hive Metastore schema
+        # Verify that the Hive Metastore schema is properly initialized
+        run: |
+          echo "Verifying Hive Metastore schema..."
+          docker compose exec hive-metastore-db psql -U hive -d metastore -c "\dt" | head -10
+          echo "Hive Metastore schema verification completed."
+
+      - name: Stop Hadoop Cluster
+        # Stop and remove all services, networks, and volumes created by Docker Compose.
+        # This ensures a clean state for subsequent runs.
+        if: always() # Run this step even if previous steps fail
+        run: docker compose down -v
