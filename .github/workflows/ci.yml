@@ -91,31 +91,139 @@ jobs:
             local count=0
 
             while [ $count -lt $timeout ]; do
-              if docker compose ps "$service" --format json | jq -r '.[0].Health' | grep -q "healthy"; then
-                echo "✅ $service is healthy"
+              # First check if the service exists and is running
+              if ! docker compose ps "$service" --format json >/dev/null 2>&1; then
+                echo "⚠️  Service $service not found or not running"
+                sleep 5
+                count=$((count + 5))
+                echo "Waiting for $service... ($count/$timeout seconds)"
+                continue
+              fi
+
+              # Get the JSON output and debug it
+              local json_output
+              json_output=$(docker compose ps "$service" --format json 2>/dev/null)
+              
+              if [ -z "$json_output" ]; then
+                echo "⚠️  No output from docker compose ps for $service"
+                sleep 5
+                count=$((count + 5))
+                echo "Waiting for $service... ($count/$timeout seconds)"
+                continue
+              fi
+
+              # Check if it's an array or single object
+              local health_status
+              if echo "$json_output" | jq -e '. | type' | grep -q "array"; then
+                # It's an array, use index 0
+                health_status=$(echo "$json_output" | jq -r '.[0].Health // empty' 2>/dev/null)
+              else
+                # It's a single object
+                health_status=$(echo "$json_output" | jq -r '.Health // empty' 2>/dev/null)
+              fi
+
+              # If Health field doesn't exist, check State instead
+              if [ -z "$health_status" ]; then
+                if echo "$json_output" | jq -e '. | type' | grep -q "array"; then
+                  health_status=$(echo "$json_output" | jq -r '.[0].State // empty' 2>/dev/null)
+                else
+                  health_status=$(echo "$json_output" | jq -r '.State // empty' 2>/dev/null)
+                fi
+              fi
+
+              # Check various healthy states
+              if [[ "$health_status" == "healthy" ]] || [[ "$health_status" == "running" ]]; then
+                echo "✅ $service is healthy (status: $health_status)"
                 return 0
               fi
+
               sleep 5
               count=$((count + 5))
-              echo "Waiting for $service... ($count/$timeout seconds)"
+              echo "Waiting for $service (status: $health_status)... ($count/$timeout seconds)"
             done
 
             echo "❌ $service failed to become healthy within $timeout seconds"
             return 1
           }
 
+          # Alternative function using docker inspect (more reliable)
+          check_health_inspect() {
+            local service=$1
+            local timeout=${2:-300}
+            local count=0
+
+            while [ $count -lt $timeout ]; do
+              # Get container ID for the service
+              local container_id
+              container_id=$(docker compose ps -q "$service" 2>/dev/null)
+              
+              if [ -z "$container_id" ]; then
+                echo "⚠️  Service $service not found"
+                sleep 5
+                count=$((count + 5))
+                echo "Waiting for $service... ($count/$timeout seconds)"
+                continue
+              fi
+
+              # Check health using docker inspect
+              local health_status
+              health_status=$(docker inspect "$container_id" --format='{{.State.Health.Status}}' 2>/dev/null)
+              
+              # If no health check is defined, check if container is running
+              if [ "$health_status" = "<no value>" ] || [ -z "$health_status" ]; then
+                health_status=$(docker inspect "$container_id" --format='{{.State.Status}}' 2>/dev/null)
+              fi
+
+              if [[ "$health_status" == "healthy" ]] || [[ "$health_status" == "running" ]]; then
+                echo "✅ $service is healthy (status: $health_status)"
+                return 0
+              fi
+
+              sleep 5
+              count=$((count + 5))
+              echo "Waiting for $service (status: $health_status)... ($count/$timeout seconds)"
+            done
+
+            echo "❌ $service failed to become healthy within $timeout seconds"
+            return 1
+          }
+
+          # Function to debug docker compose output
+          debug_service() {
+            local service=$1
+            echo "🔍 Debugging $service:"
+            echo "Raw docker compose ps output:"
+            docker compose ps "$service" --format json | jq '.' 2>/dev/null || echo "Failed to parse JSON"
+            echo "Container status via docker inspect:"
+            local container_id
+            container_id=$(docker compose ps -q "$service" 2>/dev/null)
+            if [ -n "$container_id" ]; then
+              docker inspect "$container_id" --format='Health: {{.State.Health.Status}}, Status: {{.State.Status}}' 2>/dev/null
+            fi
+            echo "---"
+          }
+
           # Wait for core services to be healthy
-          check_health "postgres" 180
-          check_health "redis" 180
+          echo "Checking core services..."
+
+          # Debug the first service to understand the JSON structure
+          debug_service "postgres"
+
+          # Use the more reliable inspect method
+          check_health_inspect "postgres" 180
+          check_health_inspect "redis" 180
 
           # Wait a bit for Airflow services to stabilize
           sleep 30
 
           # Check Airflow services
+          echo "Checking Airflow services..."
           services=("airflow-apiserver" "airflow-scheduler" "airflow-dag-processor" "airflow-worker" "airflow-triggerer")
           for service in "${services[@]}"; do
-            check_health "$service" 300
+            check_health_inspect "$service" 300
           done
+
+          echo "🎉 All services are healthy!"
 
       - name: Verify container status
         run: |
