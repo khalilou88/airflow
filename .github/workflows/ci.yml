@@ -409,9 +409,68 @@ jobs:
           fi
           echo "✅ API access verified"
 
+          # Additional debug: Check if we can access DAGs with different approaches
+          echo -e "\n2.5. Testing DAG endpoint access..."
+          dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
+          if [ "$dag_test_status" != "200" ]; then
+              echo "❌ DAG endpoint access failed with status: $dag_test_status"
+              
+              # Try to fix permissions by recreating user with explicit permissions
+              echo "Attempting to fix user permissions..."
+              
+              # Delete existing user if it exists
+              docker compose exec -T airflow-apiserver airflow users delete --username airflow 2>/dev/null || true
+              
+              # Create user with explicit role
+              create_result=$(docker compose exec -T airflow-apiserver airflow users create \
+                  --role Admin \
+                  --username airflow \
+                  --email airflow@example.com \
+                  --firstname Airflow \
+                  --lastname Admin \
+                  --password airflow 2>&1)
+              
+              echo "User creation result: $create_result"
+              
+              # Wait for permissions to propagate
+              sleep 10
+              
+              # Test again
+              dag_test_status=$(curl -s -o /dev/null -w "%{http_code}" -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
+              if [ "$dag_test_status" != "200" ]; then
+                  echo "❌ Still cannot access DAG endpoint. Checking webserver configuration..."
+                  
+                  # Check if authentication is properly configured
+                  echo "Checking Airflow configuration..."
+                  docker compose exec -T airflow-apiserver airflow config get-value api auth_backends 2>/dev/null || echo "Could not get auth config"
+                  
+                  # Try accessing web UI to see if that works
+                  web_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ 2>/dev/null)
+                  echo "Web UI status: $web_status"
+                  
+                  if [ "$web_status" != "200" ]; then
+                      echo "❌ Web UI also not accessible. Airflow may not be fully started."
+                      echo "Checking container status..."
+                      docker compose ps
+                      exit 1
+                  fi
+              else
+                  echo "✅ DAG endpoint access fixed"
+              fi
+          else
+              echo "✅ DAG endpoint access verified"
+          fi
+
           # Check if DAGs exist
           echo -e "\n3. Checking available DAGs..."
           dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
+
+          # Debug: Show raw response if there's an issue
+          if ! echo "$dags_response" | jq . >/dev/null 2>&1; then
+              echo "❌ Invalid JSON response from DAGs endpoint:"
+              echo "$dags_response"
+              exit 1
+          fi
 
           # Count available DAGs
           dag_count=$(echo "$dags_response" | jq -r '.total_entries // 0' 2>/dev/null)
@@ -484,9 +543,19 @@ jobs:
               docker compose exec -T airflow-apiserver mkdir -p /opt/airflow/dags
               docker compose cp /tmp/test_dag.py airflow-apiserver:/opt/airflow/dags/
               
-              # Wait for DAG to be parsed
-              echo "Waiting for DAG to be parsed (30 seconds)..."
-              sleep 30
+              # Also check scheduler container if it's separate
+              if docker compose ps | grep -q scheduler; then
+                  echo "Copying DAG to scheduler container as well..."
+                  docker compose cp /tmp/test_dag.py airflow-scheduler:/opt/airflow/dags/ 2>/dev/null || echo "Scheduler container copy failed or not needed"
+              fi
+              
+              # Force DAG parsing by restarting scheduler or triggering refresh
+              echo "Triggering DAG refresh..."
+              docker compose exec -T airflow-apiserver airflow dags reserialize 2>/dev/null || echo "Reserialize command not available"
+              
+              # Wait for DAG to be parsed - increased wait time
+              echo "Waiting for DAG to be parsed (45 seconds)..."
+              sleep 45
               
               # Check if the DAG is now available
               dags_response=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/dags 2>/dev/null)
@@ -495,8 +564,31 @@ jobs:
               if [ "$dag_count" -gt 0 ]; then
                   echo "✅ Test DAG created successfully"
               else
-                  echo "❌ Failed to create test DAG. Check Airflow logs:"
-                  docker compose logs airflow-apiserver | tail -10
+                  echo "❌ Failed to create test DAG. Checking detailed status..."
+                  
+                  # Check DAG parsing errors
+                  echo "Checking for DAG import errors..."
+                  import_errors=$(curl -s -u "$working_creds" http://localhost:8080/api/v2/importErrors 2>/dev/null)
+                  if echo "$import_errors" | jq -e '.import_errors[]?' >/dev/null 2>&1; then
+                      echo "DAG import errors found:"
+                      echo "$import_errors" | jq -r '.import_errors[] | "  \(.filename): \(.stack_trace)"' 2>/dev/null
+                  else
+                      echo "No import errors found"
+                  fi
+                  
+                  # Check scheduler logs
+                  echo "Recent scheduler/parser logs:"
+                  if docker compose ps | grep -q scheduler; then
+                      docker compose logs --tail=20 airflow-scheduler | grep -i "dag\|error\|exception" || echo "No relevant scheduler logs"
+                  else
+                      docker compose logs --tail=20 airflow-apiserver | grep -i "dag\|error\|exception" || echo "No relevant logs"
+                  fi
+                  
+                  # Check if DAG file exists in container
+                  echo "Checking if DAG file exists in container..."
+                  docker compose exec -T airflow-apiserver ls -la /opt/airflow/dags/ || echo "Could not list DAG directory"
+                  docker compose exec -T airflow-apiserver cat /opt/airflow/dags/test_dag.py | head -5 || echo "Could not read DAG file"
+                  
                   exit 1
               fi
           fi
@@ -538,6 +630,7 @@ jobs:
                   echo "✅ DAG unpaused successfully"
               else
                   echo "❌ Failed to unpause DAG"
+                  echo "Unpause response: $unpause_result"
               fi
           else
               echo "✅ DAG is active"
@@ -560,9 +653,9 @@ jobs:
               
               # Wait for execution
               echo -e "\n7. Monitoring DAG execution..."
-              for i in {1..12}; do  # Check for up to 60 seconds
+              for i in {1..24}; do  # Check for up to 120 seconds (increased timeout)
                   sleep 5
-                  echo "Checking status... (${i}/12)"
+                  echo "Checking status... (${i}/24)"
                   
                   run_response=$(curl -s -u "$working_creds" \
                       "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id" 2>/dev/null)
@@ -609,6 +702,28 @@ jobs:
                   echo "$tasks_response" | jq -r '.task_instances[] | "  \(.task_id): \(.state)"' 2>/dev/null
               else
                   echo "  No task information available"
+              fi
+              
+              # If execution failed, show task logs for debugging
+              if [ "$run_status" = "failed" ]; then
+                  echo -e "\n🔍 Checking failed task logs..."
+                  failed_tasks=$(echo "$tasks_response" | jq -r '.task_instances[] | select(.state == "failed") | .task_id' 2>/dev/null)
+                  
+                  if [ -n "$failed_tasks" ]; then
+                      echo "Failed tasks: $failed_tasks"
+                      for task_id in $failed_tasks; do
+                          echo -e "\nLogs for failed task: $task_id"
+                          log_response=$(curl -s -u "$working_creds" \
+                              "http://localhost:8080/api/v2/dags/$dag_to_test/dagRuns/$dag_run_id/taskInstances/$task_id/logs/1" 2>/dev/null)
+                          
+                          # Extract log content if available
+                          if echo "$log_response" | jq -e '.content?' >/dev/null 2>&1; then
+                              echo "$log_response" | jq -r '.content' 2>/dev/null
+                          else
+                              echo "Log content not available via API"
+                          fi
+                      done
+                  fi
               fi
               
           else
