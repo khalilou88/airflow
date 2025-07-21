@@ -233,15 +233,28 @@ jobs:
           echo -e "\n=== Verifying all expected containers are running ==="
           expected_services=("postgres" "redis" "airflow-apiserver" "airflow-scheduler" "airflow-dag-processor" "airflow-worker" "airflow-triggerer")
 
+          all_healthy=true
+
           for service in "${expected_services[@]}"; do
-            if docker compose ps "$service" --format json | jq -r '.[0].State' | grep -q "running"; then
+            # Simple approach: check if the service appears as "Up" and optionally "healthy" in docker compose ps
+            if docker compose ps "$service" --format "table {{.Service}}\t{{.Status}}" | grep -E "(Up|healthy)" > /dev/null; then
               echo "✅ $service is running"
             else
-              echo "❌ $service is not running"
+              echo "❌ $service is not running properly"
+              echo "Status for $service:"
+              docker compose ps "$service"
+              echo "Recent logs for $service:"
               docker compose logs "$service" --tail=20
-              exit 1
+              all_healthy=false
             fi
           done
+
+          if [ "$all_healthy" = true ]; then
+            echo -e "\n🎉 All expected services are running!"
+          else
+            echo -e "\n❌ Some services are not healthy"
+            exit 1
+          fi
 
       - name: Test Airflow Web UI and API
         run: |
