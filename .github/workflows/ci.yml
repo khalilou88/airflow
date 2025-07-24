@@ -1025,7 +1025,7 @@ jobs:
               
               # Check webserver logs
               echo "Recent webserver logs:"
-              docker compose logs --tail=20 airflow-apiserver || docker compose logs --tail=20 airflow-webserver || echo "No webserver logs available"
+              docker compose logs --tail=20 airflow-apiserver || docker compose logs --tail=20 airflow-apiserver || echo "No webserver logs available"
               
               exit 1
           fi
